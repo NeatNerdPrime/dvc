@@ -6,26 +6,23 @@ from dvc.path_info import PathInfo
 from dvc.types import DvcPath
 
 if TYPE_CHECKING:
-    from dvc.output.base import BaseOutput
+    from dvc.output import Output
     from dvc.repo import Repo
 
 logger = logging.getLogger(__name__)
 
 
-FilterFn = Callable[["BaseOutput"], bool]
-Outputs = List["BaseOutput"]
+FilterFn = Callable[["Output"], bool]
+Outputs = List["Output"]
 DvcPaths = List[DvcPath]
 
 
 def _collect_outs(
-    repo: "Repo", output_filter: FilterFn = None, deps: bool = False,
+    repo: "Repo", output_filter: FilterFn = None, deps: bool = False
 ) -> Outputs:
-    outs = [
-        out
-        for stage in repo.graph  # using `graph` to ensure graph checks run
-        for out in (stage.deps if deps else stage.outs)
-    ]
-    return list(filter(output_filter, outs)) if output_filter else outs
+    index = repo.index
+    index.check_graph()  # ensure graph is correct
+    return list(filter(output_filter, index.deps if deps else index.outs))
 
 
 def _collect_paths(
@@ -43,19 +40,15 @@ def _collect_paths(
     for path_info in path_infos:
 
         if recursive and fs.isdir(path_info):
-            target_infos.extend(fs.walk_files(path_info))
+            target_infos.extend(repo.dvcignore.walk_files(fs, path_info))
 
         if not fs.exists(path_info):
-            if not recursive:
-                if rev == "workspace" or rev == "":
-                    logger.warning(
-                        "'%s' was not found in current workspace.", path_info,
-                    )
-                else:
-                    logger.warning(
-                        "'%s' was not found at: '%s'.", path_info, rev,
-                    )
-            continue
+            if rev == "workspace" or rev == "":
+                logger.warning(
+                    "'%s' was not found in current workspace.", path_info
+                )
+            else:
+                logger.warning("'%s' was not found at: '%s'.", path_info, rev)
         target_infos.append(path_info)
     return target_infos
 

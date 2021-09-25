@@ -41,6 +41,21 @@ class MergeConflictError(SCMError):
     pass
 
 
+class InvalidRemoteSCMRepo(SCMError):
+    def __init__(self, url: str):
+        msg = f"'{url}' is not a valid Git remote or URL"
+        super().__init__(msg)
+
+
+class GitAuthError(SCMError):
+    def __init__(self, url: str):
+        super().__init__(
+            f"HTTP Git authentication is not supported: '{url}'"
+            "\nSee https://dvc.org/doc//user-guide/"
+            "troubleshooting#git-auth"
+        )
+
+
 class Base:
     """Base class for source control management driver implementations."""
 
@@ -92,8 +107,7 @@ class Base:
         return [self.ignore(path) for path in p_list]
 
     def add(self, paths):
-        """Makes SCM start tracking every path from a specified list of paths.
-        """
+        """Makes SCM track every path from a specified list of paths."""
 
     def commit(self, msg):
         """Makes SCM create a commit."""
@@ -197,7 +211,7 @@ class Base:
         """Return boolean whether file belongs to scm"""
 
     def close(self):
-        """ Method to close the files """
+        """Method to close the files"""
 
     def _reset(self) -> None:
         pass

@@ -1,3 +1,4 @@
+import itertools
 import logging
 import os
 import stat
@@ -448,9 +449,7 @@ def test_list(tmp_dir, scm, dvc, exp_stage):
     exp_c = first(results)
     ref_info_c = first(exp_refs_by_rev(scm, exp_c))
 
-    assert dvc.experiments.ls() == {
-        baseline_c: [ref_info_c.name],
-    }
+    assert dvc.experiments.ls() == {baseline_c: [ref_info_c.name]}
 
     exp_list = dvc.experiments.ls(rev=ref_info_a.baseline_sha)
     assert {key: set(val) for key, val in exp_list.items()} == {
@@ -577,21 +576,6 @@ def test_run_metrics(tmp_dir, scm, dvc, exp_stage, mocker):
     assert show_mock.called_once()
 
 
-def test_remove(tmp_dir, scm, dvc, exp_stage):
-    results = dvc.experiments.run(exp_stage.addressing, params=["foo=2"])
-    exp = first(results)
-    ref_info = first(exp_refs_by_rev(scm, exp))
-    dvc.experiments.run(exp_stage.addressing, params=["foo=3"], queue=True)
-
-    removed = dvc.experiments.remove([str(ref_info)])
-    assert removed == 1
-    assert scm.get_ref(str(ref_info)) is None
-
-    removed = dvc.experiments.remove(queue=True)
-    assert removed == 1
-    assert len(dvc.experiments.stash) == 0
-
-
 def test_checkout_targets_deps(tmp_dir, scm, dvc, exp_stage):
     from dvc.utils.fs import remove
 
@@ -624,3 +608,61 @@ def test_fix_exp_head(tmp_dir, scm, tail):
     scm.set_ref(EXEC_BASELINE, "refs/heads/master")
     assert EXEC_BASELINE + tail == fix_exp_head(scm, head)
     assert "foo" + tail == fix_exp_head(scm, "foo" + tail)
+
+
+@pytest.mark.parametrize(
+    "workspace, params, target",
+    itertools.product((True, False), ("foo: 1", "foo: 2"), (True, False)),
+)
+def test_modified_data_dep(tmp_dir, scm, dvc, workspace, params, target):
+    tmp_dir.dvc_gen("data", "data")
+    tmp_dir.gen("copy.py", COPY_SCRIPT)
+    tmp_dir.gen("params.yaml", "foo: 1")
+    exp_stage = dvc.run(
+        cmd="python copy.py params.yaml metrics.yaml",
+        metrics_no_cache=["metrics.yaml"],
+        params=["foo"],
+        name="copy-file",
+        deps=["copy.py", "data"],
+    )
+    scm.add(
+        [
+            "dvc.yaml",
+            "dvc.lock",
+            "copy.py",
+            "params.yaml",
+            "metrics.yaml",
+            "data.dvc",
+            ".gitignore",
+        ]
+    )
+    scm.commit("init")
+
+    tmp_dir.gen("params.yaml", params)
+    tmp_dir.gen("data", "modified")
+
+    results = dvc.experiments.run(
+        exp_stage.addressing if target else None, tmp_dir=not workspace
+    )
+    exp = first(results)
+
+    for rev in dvc.brancher(revs=[exp]):
+        if rev != exp:
+            continue
+        with dvc.repo_fs.open(tmp_dir / "metrics.yaml") as fobj:
+            assert fobj.read().strip() == params
+        with dvc.repo_fs.open(tmp_dir / "data") as fobj:
+            assert fobj.read().strip() == "modified"
+
+    if workspace:
+        assert (tmp_dir / "metrics.yaml").read_text().strip() == params
+        assert (tmp_dir / "data").read_text().strip() == "modified"
+
+
+def test_exp_run_recursive(tmp_dir, scm, dvc, run_copy_metrics):
+    tmp_dir.dvc_gen("metric_t.json", '{"foo": 1}')
+    run_copy_metrics(
+        "metric_t.json", "metric.json", metrics=["metric.json"], no_exec=True
+    )
+    assert dvc.experiments.run(".", recursive=True)
+    assert (tmp_dir / "metric.json").parse() == {"foo": 1}

@@ -1,7 +1,9 @@
 import os
+import re
 
 from dvc.hash_info import HashInfo
 from dvc.path_info import PathInfo
+from dvc.repo import Repo
 from dvc.state import State
 from dvc.utils import file_md5
 
@@ -12,7 +14,7 @@ def test_state(tmp_dir, dvc):
     path_info = PathInfo(path)
     hash_info = HashInfo("md5", file_md5(path, dvc.fs))
 
-    state = State(dvc.root_dir, dvc.tmp_dir)
+    state = State(dvc.root_dir, dvc.tmp_dir, dvc.dvcignore)
 
     state.save(path_info, dvc.fs, hash_info)
     assert state.get(path_info, dvc.fs) == hash_info
@@ -65,9 +67,29 @@ def test_get_unused_links(tmp_dir, dvc):
     assert set(dvc.state.get_unused_links([], dvc.fs)) == {"foo", "bar"}
     assert set(dvc.state.get_unused_links(links[:1], dvc.fs)) == {"bar"}
     assert set(dvc.state.get_unused_links(links, dvc.fs)) == set()
-    assert set(
-        dvc.state.get_unused_links(
-            (links[:1] + [os.path.join(dvc.root_dir, "not-existing-file")]),
-            dvc.fs,
+    assert (
+        set(
+            dvc.state.get_unused_links(
+                (
+                    links[:1]
+                    + [os.path.join(dvc.root_dir, "not-existing-file")]
+                ),
+                dvc.fs,
+            )
         )
-    ) == {"bar"}
+        == {"bar"}
+    )
+
+
+def test_state_dir_config(make_tmp_dir, dvc):
+    assert dvc.state.tmp_dir == dvc.tmp_dir
+
+    index_dir = str(make_tmp_dir("tmp_index"))
+    repo = Repo(config={"state": {"dir": index_dir}})
+    assert os.path.dirname(repo.state.tmp_dir) == os.path.join(
+        index_dir, ".dvc"
+    )
+    assert re.match(
+        r"^test_state_dir_config0-([0-9a-f]+)$",
+        os.path.basename(repo.state.tmp_dir),
+    )

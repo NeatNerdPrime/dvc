@@ -20,7 +20,27 @@ class ConfigError(DvcException):
         super().__init__(f"config file error: {msg}")
 
 
-class NoRemoteError(ConfigError):
+class RemoteConfigError(ConfigError):
+    pass
+
+
+class NoRemoteError(RemoteConfigError):
+    pass
+
+
+class RemoteNotFoundError(RemoteConfigError):
+    pass
+
+
+class MachineConfigError(ConfigError):
+    pass
+
+
+class NoMachineError(MachineConfigError):
+    pass
+
+
+class MachineNotFoundError(MachineConfigError):
     pass
 
 
@@ -56,14 +76,16 @@ class Config(dict):
     APPNAME = "dvc"
     APPAUTHOR = "iterative"
 
+    SYSTEM_LEVELS = ("system", "global")
+    REPO_LEVELS = ("repo", "local")
     # In the order they shadow each other
-    LEVELS = ("system", "global", "repo", "local")
+    LEVELS = SYSTEM_LEVELS + REPO_LEVELS
 
     CONFIG = "config"
     CONFIG_LOCAL = "config.local"
 
     def __init__(
-        self, dvc_dir=None, validate=True, fs=None, config=None,
+        self, dvc_dir=None, validate=True, fs=None, config=None
     ):  # pylint: disable=super-init-not-called
         from dvc.fs.local import LocalFileSystem
 
@@ -79,7 +101,7 @@ class Config(dict):
         else:
             self.dvc_dir = os.path.abspath(os.path.realpath(dvc_dir))
 
-        self.wfs = LocalFileSystem(None, {"url": self.dvc_dir})
+        self.wfs = LocalFileSystem(url=self.dvc_dir)
         self.fs = fs or self.wfs
 
         self.load(validate=validate, config=config)
@@ -154,12 +176,12 @@ class Config(dict):
         filename = self.files[level]
         fs = self._get_fs(level)
 
-        if fs.exists(filename, use_dvcignore=False):
+        if fs.exists(filename):
             with fs.open(filename) as fobj:
                 conf_obj = ConfigObj(fobj)
         else:
             conf_obj = ConfigObj()
-        return _parse_remotes(_lower_keys(conf_obj.dict()))
+        return _parse_named(_lower_keys(conf_obj.dict()))
 
     def _save_config(self, level, conf_dict):
         from configobj import ConfigObj
@@ -171,7 +193,7 @@ class Config(dict):
 
         fs.makedirs(os.path.dirname(filename))
 
-        config = ConfigObj(_pack_remotes(conf_dict))
+        config = ConfigObj(_pack_named(conf_dict))
         with fs.open(filename, "wb") as fobj:
             config.write(fobj)
         config.filename = filename
@@ -243,6 +265,7 @@ class Config(dict):
                     "key_path": func,
                 }
             },
+            "machine": {str: {"startup_script": func}},
         }
         return Schema(dirs_schema, extra=ALLOW_EXTRA)(conf)
 
@@ -265,7 +288,7 @@ class Config(dict):
     def edit(self, level=None, validate=True):
         # NOTE: we write to repo config by default, same as git config
         level = level or "repo"
-        if level in {"repo", "local"} and self.dvc_dir is None:
+        if self.dvc_dir is None and level in self.REPO_LEVELS:
             raise ConfigError("Not inside a DVC repo")
 
         conf = self.load_one(level)
@@ -292,27 +315,29 @@ class Config(dict):
             raise ConfigError(str(exc)) from None
 
 
-def _parse_remotes(conf):
-    result = {"remote": {}}
+def _parse_named(conf):
+    result = {"remote": {}, "machine": {}}
 
     for section, val in conf.items():
-        name = re_find(r'^\s*remote\s*"(.*)"\s*$', section)
-        if name:
-            result["remote"][name] = val
+        match = re_find(r'^\s*(remote|machine)\s*"(.*)"\s*$', section)
+        if match:
+            key, name = match
+            result[key][name] = val
         else:
             result[section] = val
 
     return result
 
 
-def _pack_remotes(conf):
+def _pack_named(conf):
     # Drop empty sections
     result = compact(conf)
 
     # Transform remote.name -> 'remote "name"'
-    for name, val in conf["remote"].items():
-        result[f'remote "{name}"'] = val
-    result.pop("remote", None)
+    for key in ("remote", "machine"):
+        for name, val in conf[key].items():
+            result[f'{key} "{name}"'] = val
+        result.pop(key, None)
 
     return result
 

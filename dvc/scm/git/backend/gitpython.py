@@ -3,7 +3,16 @@ import locale
 import logging
 import os
 from functools import partial
-from typing import Callable, Iterable, List, Mapping, Optional, Tuple, Union
+from typing import (
+    TYPE_CHECKING,
+    Callable,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Tuple,
+    Union,
+)
 
 from funcy import ignore
 
@@ -13,6 +22,9 @@ from dvc.utils import fix_env, is_binary, relpath
 
 from ..objects import GitCommit, GitObject
 from .base import BaseGitBackend
+
+if TYPE_CHECKING:
+    from dvc.types import StrPath
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +92,14 @@ class GitPythonObject(GitObject):
         for obj in self.obj:
             yield GitPythonObject(obj)
 
+    @property
+    def size(self) -> int:
+        return self.obj.size
+
+    @property
+    def sha(self) -> str:
+        return self.obj.hexsha
+
 
 class GitPythonBackend(BaseGitBackend):  # pylint:disable=abstract-method
     """git-python Git backend."""
@@ -111,11 +131,11 @@ class GitPythonBackend(BaseGitBackend):  # pylint:disable=abstract-method
     def git(self):
         return self.repo.git
 
-    def is_ignored(self, path: str) -> bool:
+    def is_ignored(self, path: "StrPath") -> bool:
         from git.exc import GitCommandError
 
         func = ignore(GitCommandError)(self.repo.git.check_ignore)
-        return bool(func(path))
+        return bool(func(str(path)))
 
     @property
     def root_dir(self) -> str:
@@ -274,7 +294,7 @@ class GitPythonBackend(BaseGitBackend):  # pylint:disable=abstract-method
         return [
             c.hexsha
             for c in self.repo.iter_commits(
-                rev=head, branches=True, tags=True, remotes=True,
+                rev=head, branches=True, tags=True, remotes=True
             )
         ]
 
@@ -606,3 +626,6 @@ class GitPythonBackend(BaseGitBackend):  # pylint:disable=abstract-method
                 raise MergeConflictError("Merge contained conflicts") from exc
             raise SCMError("Merge failed") from exc
         return None
+
+    def validate_git_remote(self, url: str):
+        raise NotImplementedError

@@ -1,55 +1,29 @@
 import logging
+from itertools import chain
 
 from shortuuid import uuid
 
-import dvc.prompt as prompt
+from dvc import prompt
 from dvc.exceptions import (
     CacheLinkError,
     CheckoutError,
     ConfirmRemoveError,
     DvcException,
 )
-from dvc.objects import check, load
-from dvc.objects.errors import ObjectFormatError
-from dvc.objects.stage import stage
-from dvc.remote.slow_link_detection import (  # type: ignore[attr-defined]
+from dvc.ignore import DvcIgnoreFilter
+from dvc.objects.db.slow_link_detection import (  # type: ignore[attr-defined]
     slow_link_guard,
 )
+from dvc.objects.diff import ROOT
+from dvc.objects.diff import diff as odiff
+from dvc.objects.stage import stage
+from dvc.objects.tree import Tree
+from dvc.types import Optional
 
 logger = logging.getLogger(__name__)
 
 
-def _changed(path_info, fs, obj, cache):
-    logger.trace("checking if '%s'('%s') has changed.", path_info, obj)
-
-    try:
-        check(cache, obj)
-    except (FileNotFoundError, ObjectFormatError):
-        logger.debug(
-            "cache for '%s'('%s') has changed.", path_info, obj.hash_info
-        )
-        return True
-
-    try:
-        actual = stage(cache, path_info, fs, obj.hash_info.name).hash_info
-    except FileNotFoundError:
-        logger.debug("'%s' doesn't exist.", path_info)
-        return True
-
-    if obj.hash_info != actual:
-        logger.debug(
-            "hash value '%s' for '%s' has changed (actual '%s').",
-            obj.hash_info,
-            actual,
-            path_info,
-        )
-        return True
-
-    logger.trace("'%s' hasn't changed.", path_info)
-    return False
-
-
-def _remove(path_info, fs, cache, force=False):
+def _remove(path_info, fs, in_cache, force=False):
     if not fs.exists(path_info):
         return
 
@@ -57,11 +31,7 @@ def _remove(path_info, fs, cache, force=False):
         fs.remove(path_info)
         return
 
-    current = stage(cache, path_info, fs, fs.PARAM_CHECKSUM).hash_info
-    try:
-        obj = load(cache, current)
-        check(cache, obj)
-    except (FileNotFoundError, ObjectFormatError):
+    if not in_cache:
         msg = (
             f"file/directory '{path_info}' is going to be removed. "
             "Are you sure you want to proceed?"
@@ -90,12 +60,12 @@ def _verify_link(cache, path_info, link_type):
 
 def _do_link(cache, from_info, to_info, link_method):
     if cache.fs.exists(to_info):
-        raise DvcException(f"Link '{to_info}' already exists!")
+        cache.fs.remove(to_info)  # broken symlink
 
     link_method(from_info, to_info)
 
     logger.debug(
-        "Created '%s': %s -> %s", cache.cache_types[0], from_info, to_info,
+        "Created '%s': %s -> %s", cache.cache_types[0], from_info, to_info
     )
 
 
@@ -118,9 +88,11 @@ def _try_links(cache, from_info, to_info, link_types):
 
 
 def _link(cache, from_info, to_info):
-    assert cache.fs.isfile(from_info)
     cache.makedirs(to_info.parent)
-    _try_links(cache, from_info, to_info, cache.cache_types)
+    try:
+        _try_links(cache, from_info, to_info, cache.cache_types)
+    except FileNotFoundError as exc:
+        raise CheckoutError([str(to_info)]) from exc
 
 
 def _cache_is_copy(cache, path_info):
@@ -132,7 +104,7 @@ def _cache_is_copy(cache, path_info):
         return True
 
     workspace_file = path_info.with_name("." + uuid())
-    test_cache_file = cache.fs.path_info / ".cache_type_test_file"
+    test_cache_file = cache.path_info / ".cache_type_test_file"
     if not cache.fs.exists(test_cache_file):
         cache.makedirs(test_cache_file.parent)
         with cache.fs.open(test_cache_file, "wb") as fobj:
@@ -148,100 +120,119 @@ def _cache_is_copy(cache, path_info):
 
 
 def _checkout_file(
-    path_info, fs, obj, cache, force, progress_callback=None, relink=False,
+    path_info,
+    fs,
+    change,
+    cache,
+    force,
+    progress_callback=None,
+    relink=False,
+    state=None,
 ):
     """The file is changed we need to checkout a new copy"""
     modified = False
-    cache_info = cache.hash_to_path_info(obj.hash_info.value)
-    if fs.exists(path_info):
-        if not relink and _changed(path_info, fs, obj, cache):
-            modified = True
-            _remove(path_info, fs, cache, force=force)
-            _link(cache, cache_info, path_info)
-        else:
+    cache_info = cache.hash_to_path_info(change.new.obj.hash_info.value)
+    if change.old.obj:
+        if relink:
             if fs.iscopy(path_info) and _cache_is_copy(cache, path_info):
                 cache.unprotect(path_info)
             else:
-                _remove(path_info, fs, cache, force=force)
+                _remove(path_info, fs, change.old.in_cache, force=force)
                 _link(cache, cache_info, path_info)
+        else:
+            modified = True
+            _remove(path_info, fs, change.old.in_cache, force=force)
+            _link(cache, cache_info, path_info)
     else:
         _link(cache, cache_info, path_info)
         modified = True
 
-    fs.repo.state.save(path_info, fs, obj.hash_info)
+    if state:
+        state.save(path_info, fs, change.new.obj.hash_info)
+
     if progress_callback:
         progress_callback(str(path_info))
 
     return modified
 
 
-def _remove_redundant_files(path_info, fs, obj, cache, force):
-    existing_files = set(fs.walk_files(path_info))
-
-    needed_files = {path_info.joinpath(*key) for key, _ in obj}
-    redundant_files = existing_files - needed_files
-    for path in redundant_files:
-        _remove(path, fs, cache, force)
-
-    return bool(redundant_files)
-
-
-def _checkout_dir(
-    path_info, fs, obj, cache, force, progress_callback=None, relink=False,
-):
-    modified = False, False
-    # Create dir separately so that dir is created
-    # even if there are no files in it
-    if not fs.exists(path_info):
-        modified = True
-        fs.makedirs(path_info)
-
-    logger.debug("Linking directory '%s'.", path_info)
-
-    for entry_key, entry_obj in obj:
-        entry_modified = _checkout_file(
-            path_info.joinpath(*entry_key),
-            fs,
-            entry_obj,
-            cache,
-            force,
-            progress_callback,
-            relink,
-        )
-        if entry_modified:
-            modified = True
-
-    modified = (
-        _remove_redundant_files(path_info, fs, obj, cache, force) or modified
-    )
-
-    fs.repo.state.save(path_info, fs, obj.hash_info)
-
-    # relink is not modified, assume it as nochange
-    return modified and not relink
-
-
-def _checkout(
+def _diff(
     path_info,
     fs,
     obj,
     cache,
+    relink=False,
+    dvcignore: Optional[DvcIgnoreFilter] = None,
+):
+    old = None
+    try:
+        _, old = stage(
+            cache,
+            path_info,
+            fs,
+            obj.hash_info.name if obj else cache.fs.PARAM_CHECKSUM,
+            dry_run=True,
+            dvcignore=dvcignore,
+        )
+    except FileNotFoundError:
+        pass
+
+    diff = odiff(old, obj, cache)
+
+    if relink:
+        diff.modified.extend(diff.unchanged)
+
+    return diff
+
+
+def _checkout(
+    diff,
+    path_info,
+    fs,
+    cache,
     force=False,
     progress_callback=None,
     relink=False,
+    state=None,
 ):
-    if not obj.hash_info.isdir:
-        ret = _checkout_file(
-            path_info, fs, obj, cache, force, progress_callback, relink
-        )
-    else:
-        ret = _checkout_dir(
-            path_info, fs, obj, cache, force, progress_callback, relink,
-        )
+    if not diff:
+        return
 
-    fs.repo.state.save_link(path_info, fs)
+    for change in diff.deleted:
+        entry_path = (
+            path_info.joinpath(*change.old.key)
+            if change.old.key != ROOT
+            else path_info
+        )
+        _remove(entry_path, fs, change.old.in_cache, force=force)
 
-    return ret
+    failed = []
+    for change in chain(diff.added, diff.modified):
+        entry_path = (
+            path_info.joinpath(*change.new.key)
+            if change.new.key != ROOT
+            else path_info
+        )
+        if isinstance(change.new.obj, Tree):
+            fs.makedirs(entry_path)
+            continue
+
+        try:
+            _checkout_file(
+                entry_path,
+                fs,
+                change,
+                cache,
+                force,
+                progress_callback,
+                relink,
+                state=state,
+            )
+        except CheckoutError as exc:
+            failed.extend(exc.target_infos)
+
+    if failed:
+        raise CheckoutError(failed)
 
 
 def checkout(
@@ -253,48 +244,57 @@ def checkout(
     progress_callback=None,
     relink=False,
     quiet=False,
+    dvcignore: Optional[DvcIgnoreFilter] = None,
+    state=None,
 ):
+
     if path_info.scheme not in ["local", cache.fs.scheme]:
         raise NotImplementedError
 
-    failed = None
-    skip = False
+    diff = _diff(
+        path_info,
+        fs,
+        obj,
+        cache,
+        relink=relink,
+        dvcignore=dvcignore,
+    )
+
+    failed = []
     if not obj:
         if not quiet:
             logger.warning(
                 "No file hash info found for '%s'. It won't be created.",
                 path_info,
             )
-        _remove(path_info, fs, cache, force=force)
-        failed = path_info
+        failed.append(str(path_info))
+    elif not diff:
+        logger.trace("Data '%s' didn't change.", path_info)  # type: ignore
 
-    elif not relink and not _changed(path_info, fs, obj, cache):
-        logger.trace("Data '%s' didn't change.", path_info)
-        skip = True
-    else:
-        try:
-            check(cache, obj)
-        except (FileNotFoundError, ObjectFormatError):
-            if not quiet:
-                logger.warning(
-                    "Cache '%s' not found. File '%s' won't be created.",
-                    obj.hash_info,
-                    path_info,
-                )
-            _remove(path_info, fs, cache, force=force)
-            failed = path_info
+    try:
+        _checkout(
+            diff,
+            path_info,
+            fs,
+            cache,
+            force=force,
+            progress_callback=progress_callback,
+            relink=relink,
+            state=state,
+        )
+    except CheckoutError as exc:
+        failed.extend(exc.target_infos)
 
-    if failed or skip:
+    if diff and state:
+        state.save_link(path_info, fs)
+        if not failed:
+            state.save(path_info, fs, obj.hash_info)
+
+    if failed or not diff:
         if progress_callback and obj:
-            progress_callback(
-                str(path_info), len(obj),
-            )
+            progress_callback(str(path_info), len(obj))
         if failed:
-            raise CheckoutError([failed])
+            raise CheckoutError(failed)
         return
 
-    logger.debug("Checking out '%s' with cache '%s'.", path_info, obj)
-
-    return _checkout(
-        path_info, fs, obj, cache, force, progress_callback, relink,
-    )
+    return bool(diff) and not relink

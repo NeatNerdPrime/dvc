@@ -1,9 +1,7 @@
 import argparse
-import logging
 
 from dvc.command.base import CmdBase, append_doc_link
-
-logger = logging.getLogger(__name__)
+from dvc.ui import ui
 
 
 def _show_ascii(G):
@@ -38,18 +36,20 @@ def _collect_targets(repo, target, outs):
         return [stage.addressing for stage, _ in pairs]
 
     targets = []
+
+    outs_trie = repo.index.outs_trie
     for stage, info in pairs:
         if not info:
             targets.extend([str(out) for out in stage.outs])
             continue
 
-        for out in repo.outs_trie.itervalues(prefix=info.parts):  # noqa: B301
+        for out in outs_trie.itervalues(prefix=info.parts):  # noqa: B301
             targets.extend(str(out))
 
     return targets
 
 
-def _transform(repo, outs):
+def _transform(index, outs):
     import networkx as nx
 
     from dvc.stage import Stage
@@ -57,7 +57,7 @@ def _transform(repo, outs):
     def _relabel(node) -> str:
         return node.addressing if isinstance(node, Stage) else str(node)
 
-    G = repo.outs_graph if outs else repo.graph
+    G = index.outs_graph if outs else index.graph
     return nx.relabel_nodes(G, _relabel, copy=True)
 
 
@@ -87,7 +87,7 @@ def _filter(G, targets, full):
 
 def _build(repo, target=None, full=False, outs=False):
     targets = _collect_targets(repo, target, outs)
-    G = _transform(repo, outs)
+    G = _transform(repo.index, outs)
     return _filter(G, targets, full)
 
 
@@ -101,7 +101,7 @@ class CmdDAG(CmdBase):
         )
 
         if self.args.dot:
-            logger.info(_show_dot(G))
+            ui.write(_show_dot(G))
         else:
             from dvc.utils.pager import pager
 

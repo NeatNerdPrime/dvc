@@ -151,7 +151,9 @@ class Git(Base):
         gitignore = os.path.join(ignore_file_dir, self.GITIGNORE)
 
         if not path_isin(os.path.realpath(gitignore), self.root_dir):
-            raise FileNotInRepoError(path)
+            raise FileNotInRepoError(
+                f"'{path}' is outside of git repository '{self.root_dir}'"
+            )
 
         return entry, gitignore
 
@@ -161,7 +163,7 @@ class Git(Base):
         if self.is_ignored(path):
             return
 
-        msg = "Adding '{}' to '{}'.".format(relpath(path), relpath(gitignore))
+        msg = f"Adding '{relpath(path)}' to '{relpath(gitignore)}'."
         logger.debug(msg)
 
         self._add_entry_to_gitignore(entry, gitignore)
@@ -343,7 +345,7 @@ class Git(Base):
                 pass
         raise NoGitBackendError(name)
 
-    def get_fs(self, rev: str, **kwargs):
+    def get_fs(self, rev: str):
         from dvc.fs.git import GitFileSystem
 
         from .objects import GitTrie
@@ -351,7 +353,7 @@ class Git(Base):
         resolved = self.resolve_rev(rev)
         tree_obj = self.pygit2.get_tree_obj(rev=resolved)
         trie = GitTrie(tree_obj, resolved)
-        return GitFileSystem(self.root_dir, trie, **kwargs)
+        return GitFileSystem(self.root_dir, trie)
 
     is_ignored = partialmethod(_backend_func, "is_ignored")
     add = partialmethod(_backend_func, "add")
@@ -390,6 +392,7 @@ class Git(Base):
     checkout_index = partialmethod(_backend_func, "checkout_index")
     status = partialmethod(_backend_func, "status")
     merge = partialmethod(_backend_func, "merge")
+    validate_git_remote = partialmethod(_backend_func, "validate_git_remote")
 
     def resolve_rev(self, rev: str) -> str:
         from dvc.repo.experiments.utils import exp_refs_by_name
@@ -424,7 +427,7 @@ class Git(Base):
             commit = self.resolve_commit(parent)
 
     @contextmanager
-    def detach_head(self, rev: Optional[str] = None):
+    def detach_head(self, rev: Optional[str] = None, force: bool = False):
         """Context manager for performing detached HEAD SCM operations.
 
         Detaches and restores HEAD similar to interactive git rebase.
@@ -438,7 +441,7 @@ class Git(Base):
             rev = "HEAD"
         orig_head = self.get_ref("HEAD", follow=False)
         logger.debug("Detaching HEAD at '%s'", rev)
-        self.checkout(rev, detach=True)
+        self.checkout(rev, detach=True, force=force)
         try:
             yield self.get_ref("HEAD")
         finally:

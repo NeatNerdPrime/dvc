@@ -47,13 +47,16 @@ from global repo template to creating everything inplace, which:
 
 import os
 import pathlib
+import sys
 from contextlib import contextmanager
+from functools import partialmethod
 from textwrap import dedent
 
 import pytest
 from funcy import lmap, retry
 
 from dvc.logger import disable_other_loggers
+from dvc.utils import serialize
 from dvc.utils.fs import makedirs
 
 __all__ = [
@@ -66,6 +69,8 @@ __all__ = [
     "erepo_dir",
     "git_dir",
     "git_init",
+    "git_upstream",
+    "git_downstream",
 ]
 
 
@@ -81,12 +86,17 @@ class TmpDir(pathlib.Path):
             cls = (  # pylint: disable=self-cls-assignment
                 WindowsTmpDir if os.name == "nt" else PosixTmpDir
             )
-        self = cls._from_parts(args, init=False)
+        # init parameter and `_init` method has been removed in Python 3.10.
+        kw = {"init": False} if sys.version_info < (3, 10) else {}
+        self = cls._from_parts(  # pylint: disable=unexpected-keyword-arg
+            args, **kw
+        )
         if not self._flavour.is_supported:
             raise NotImplementedError(
                 f"cannot instantiate {cls.__name__!r} on your system"
             )
-        self._init()
+        if sys.version_info < (3, 10):
+            self._init()  # pylint: disable=no-member
         return self
 
     def init(self, *, scm=False, dvc=False, subdir=False):
@@ -158,32 +168,31 @@ class TmpDir(pathlib.Path):
         paths = self.gen(struct, text)
         return self.scm_add(paths, commit=commit)
 
+    def commit(self, output_paths, msg):
+        def to_gitignore(stage_path):
+            from dvc.scm import Git
+
+            return os.path.join(os.path.dirname(stage_path), Git.GITIGNORE)
+
+        gitignores = [
+            to_gitignore(s)
+            for s in output_paths
+            if os.path.exists(to_gitignore(s))
+        ]
+        return self.scm_add(output_paths + gitignores, commit=msg)
+
     def dvc_add(self, filenames, commit=None):
         self._require("dvc")
         filenames = _coerce_filenames(filenames)
 
         stages = self.dvc.add(filenames)
         if commit:
-            stage_paths = [s.path for s in stages]
-
-            def to_gitignore(stage_path):
-                from dvc.scm import Git
-
-                return os.path.join(os.path.dirname(stage_path), Git.GITIGNORE)
-
-            gitignores = [
-                to_gitignore(s)
-                for s in stage_paths
-                if os.path.exists(to_gitignore(s))
-            ]
-            self.scm_add(stage_paths + gitignores, commit=commit)
-
+            self.commit([s.path for s in stages], msg=commit)
         return stages
 
     def scm_add(self, filenames, commit=None):
         self._require("scm")
         filenames = _coerce_filenames(filenames)
-
         self.scm.add(filenames)
         if commit:
             self.scm.commit(commit)
@@ -243,6 +252,22 @@ class TmpDir(pathlib.Path):
     def hash_to_path_info(self, hash_):
         return self / hash_[0:2] / hash_[2:]
 
+    def dump(self, *args, **kwargs):
+        return serialize.DUMPERS[self.suffix](self, *args, **kwargs)
+
+    def parse(self, *args, **kwargs):
+        return serialize.LOADERS[self.suffix](self, *args, **kwargs)
+
+    def modify(self, *args, **kwargs):
+        return serialize.MODIFIERS[self.suffix](self, *args, **kwargs)
+
+    load_yaml = partialmethod(serialize.load_yaml)
+    dump_yaml = partialmethod(serialize.dump_yaml)
+    load_json = partialmethod(serialize.load_json)
+    dump_json = partialmethod(serialize.dump_json)
+    load_toml = partialmethod(serialize.load_toml)
+    dump_toml = partialmethod(serialize.dump_toml)
+
 
 def _coerce_filenames(filenames):
     if isinstance(filenames, (str, bytes, pathlib.PurePath)):
@@ -264,6 +289,8 @@ CACHE = {}
 @pytest.fixture(scope="session")
 def make_tmp_dir(tmp_path_factory, request, worker_id):
     def make(name, *, scm=False, dvc=False, subdir=False):
+        from shutil import ignore_patterns
+
         from dvc.repo import Repo
         from dvc.scm.git import Git
         from dvc.utils.fs import fs_copy
@@ -274,9 +301,17 @@ def make_tmp_dir(tmp_path_factory, request, worker_id):
             TmpDir(cache).init(scm=scm, dvc=dvc, subdir=subdir)
             CACHE[(scm, dvc, subdir)] = os.fspath(cache)
         path = tmp_path_factory.mktemp(name) if isinstance(name, str) else name
+
+        # ignore sqlite files from .dvc/tmp. We might not be closing the cache
+        # connection resulting in PermissionErrors in Windows.
+        ignore = ignore_patterns("cache.db*")
         for entry in os.listdir(cache):
             # shutil.copytree's dirs_exist_ok is only available in >=3.8
-            fs_copy(os.path.join(cache, entry), os.path.join(path, entry))
+            fs_copy(
+                os.path.join(cache, entry),
+                os.path.join(path, entry),
+                ignore=ignore,
+            )
         new_dir = TmpDir(path)
         str_path = os.fspath(new_dir)
         if dvc:
@@ -305,7 +340,8 @@ def scm(tmp_dir):
 
 @pytest.fixture
 def dvc(tmp_dir):
-    return tmp_dir.dvc
+    with tmp_dir.dvc as _dvc:
+        yield _dvc
 
 
 def git_init(path):
@@ -391,3 +427,23 @@ def git_dir(make_tmp_dir):
     path = make_tmp_dir("git-erepo", scm=True)
     path.scm.commit("init repo")
     return path
+
+
+@pytest.fixture
+def git_upstream(tmp_dir, erepo_dir, git_dir, request):
+    remote = erepo_dir if "dvc" in request.fixturenames else git_dir
+    url = "file://{}".format(remote.resolve().as_posix())
+    tmp_dir.scm.gitpython.repo.create_remote("upstream", url)
+    remote.remote = "upstream"
+    remote.url = url
+    return remote
+
+
+@pytest.fixture
+def git_downstream(tmp_dir, erepo_dir, git_dir, request):
+    remote = erepo_dir if "dvc" in request.fixturenames else git_dir
+    url = "file://{}".format(tmp_dir.resolve().as_posix())
+    remote.scm.gitpython.repo.create_remote("upstream", url)
+    remote.remote = "upstream"
+    remote.url = url
+    return remote

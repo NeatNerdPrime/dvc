@@ -30,7 +30,7 @@ class Stash:
         return list(iter(self))
 
     def push(
-        self, message: Optional[str] = None, include_untracked: bool = False,
+        self, message: Optional[str] = None, include_untracked: bool = False
     ) -> Optional[str]:
         if not self.scm.is_dirty(untracked_files=include_untracked):
             logger.debug("No changes to stash")
@@ -46,7 +46,7 @@ class Stash:
 
     def pop(self):
         logger.debug("Popping from stash '%s'", self.ref)
-        ref = "{0}@{{0}}".format(self.ref)
+        ref = f"{self.ref}@{{0}}"
         rev = self.scm.resolve_rev(ref)
         try:
             self.apply(rev)

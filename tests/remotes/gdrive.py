@@ -7,8 +7,7 @@ from functools import partialmethod
 import pytest
 from funcy import cached_property, retry
 
-from dvc.fs.gdrive import GDriveFileSystem
-from dvc.path_info import CloudURLInfo
+from dvc.fs.gdrive import GDriveFileSystem, GDriveURLInfo
 from dvc.utils import tmp_fname
 
 from .base import Base
@@ -34,10 +33,7 @@ def _gdrive_retry(func):
             except (ValueError, LookupError):
                 return False
 
-            return reason in [
-                "userRateLimitExceeded",
-                "rateLimitExceeded",
-            ]
+            return reason in ["userRateLimitExceeded", "rateLimitExceeded"]
 
     # 16 tries, start at 0.5s, multiply by golden ratio, cap at 20s
     return retry(
@@ -47,7 +43,7 @@ def _gdrive_retry(func):
     )(func)
 
 
-class GDrive(Base, CloudURLInfo):
+class GDrive(Base, GDriveURLInfo):
     @staticmethod
     def should_test():
         return bool(os.getenv(GDriveFileSystem.GDRIVE_CREDENTIALS_DATA))
@@ -97,8 +93,13 @@ class GDrive(Base, CloudURLInfo):
 
     @_gdrive_retry
     def mkdir(self, mode=0o777, parents=False, exist_ok=False):
-        if not self.client.exists(self.path):
-            self.client.mkdir(self.path)
+        try:
+            self.client.info(self.path)
+        except FileNotFoundError:
+            self.client.mkdir(self.path, parents=parents)
+        else:
+            if not exist_ok:
+                raise FileExistsError(self.path)
 
     @_gdrive_retry
     def write_bytes(self, contents):
@@ -124,6 +125,8 @@ def gdrive(test_config, make_tmp_dir):
     tmp_dir = make_tmp_dir("gdrive", dvc=True)
 
     ret = GDrive(GDrive.get_url())
-    fs = GDriveFileSystem(tmp_dir.dvc, ret.config)
-    fs._gdrive_create_dir("root", fs.path_info.path)
+    fs = GDriveFileSystem(
+        gdrive_credentials_tmp_dir=tmp_dir.dvc.tmp_dir, **ret.config
+    )
+    fs.fs._gdrive_create_dir("root", fs.path_info.path)
     yield ret

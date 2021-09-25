@@ -8,7 +8,7 @@
 • `Tutorial <https://dvc.org/doc/get-started>`_
 • `Mailing List <https://sweedom.us10.list-manage.com/subscribe/post?u=a08bf93caae4063c4e6a351f6&id=24c0ecc49a>`_
 
-|Release| |CI| |Maintainability| |Coverage| |Donate| |DOI|
+|CI| |Maintainability| |Coverage| |Donate| |DOI|
 
 |PyPI| |Packages| |Brew| |Conda| |Choco| |Snap|
 
@@ -20,8 +20,9 @@ learning projects. Key features:
 #. Simple **command line** Git-like experience. Does not require installing and maintaining
    any databases. Does not depend on any proprietary online services.
 
-#. Management and versioning of **datasets** and **machine learning models**. Data is saved in
-   S3, Google cloud, Azure, Alibaba cloud, SSH server, HDFS, or even local HDD RAID.
+#. Management and versioning of **datasets** and **machine learning
+   models**. Data can be saved in S3, Google cloud, Azure, Alibaba 
+   cloud, SSH server, HDFS, or even local HDD RAID.
 
 #. Makes projects **reproducible** and **shareable**; helping to answer questions about how
    a model was built.
@@ -29,9 +30,9 @@ learning projects. Key features:
 #. Helps manage experiments with Git tags/branches and **metrics** tracking.
 
 **DVC** aims to replace spreadsheet and document sharing tools (such as Excel or Google Docs)
-which are being used frequently as both knowledge repositories and team ledgers.
-DVC also replaces both ad-hoc scripts to track, move, and deploy different model versions;
-as well as ad-hoc data file suffixes and prefixes.
+frequently used as both knowledge repositories and team ledgers.
+DVC also replaces both ad-hoc scripts to track, move, and deploy different model versions
+and ad-hoc data file suffixes and prefixes.
 
 .. contents:: **Contents**
   :backlinks: none
@@ -65,25 +66,25 @@ Quick start
 
 Please read `Get Started <https://dvc.org/doc/get-started>`_ guide for a full version. Common workflow commands include:
 
-+-----------------------------------+-------------------------------------------------------------------+
-| Step                              | Command                                                           |
-+===================================+===================================================================+
-| Track data                        | | ``$ git add train.py``                                          |
-|                                   | | ``$ dvc add images.zip``                                        |
-+-----------------------------------+-------------------------------------------------------------------+
-| Connect code and data by commands | | ``$ dvc run -d images.zip -o images/ unzip -q images.zip``      |
-|                                   | | ``$ dvc run -d images/ -d train.py -o model.p python train.py`` |
-+-----------------------------------+-------------------------------------------------------------------+
-| Make changes and reproduce        | | ``$ vi train.py``                                               |
-|                                   | | ``$ dvc repro model.p.dvc``                                     |
-+-----------------------------------+-------------------------------------------------------------------+
-| Share code                        | | ``$ git add .``                                                 |
-|                                   | | ``$ git commit -m 'The baseline model'``                        |
-|                                   | | ``$ git push``                                                  |
-+-----------------------------------+-------------------------------------------------------------------+
-| Share data and ML models          | | ``$ dvc remote add myremote -d s3://mybucket/image_cnn``        |
-|                                   | | ``$ dvc push``                                                  |
-+-----------------------------------+-------------------------------------------------------------------+
++-----------------------------------+----------------------------------------------------------------------------+
+| Step                              | Command                                                                    |
++===================================+============================================================================+
+| Track data                        | | ``$ git add train.py``                                                   |
+|                                   | | ``$ dvc add images.zip``                                                 |
++-----------------------------------+----------------------------------------------------------------------------+
+| Connect code and data by commands | | ``$ dvc run -n prepare -d images.zip -o images/ unzip -q images.zip``    |
+|                                   | | ``$ dvc run -n train -d images/ -d train.py -o model.p python train.py`` |
++-----------------------------------+----------------------------------------------------------------------------+
+| Make changes and reproduce        | | ``$ vi train.py``                                                        |
+|                                   | | ``$ dvc repro model.p.dvc``                                              |
++-----------------------------------+----------------------------------------------------------------------------+
+| Share code                        | | ``$ git add .``                                                          |
+|                                   | | ``$ git commit -m 'The baseline model'``                                 |
+|                                   | | ``$ git push``                                                           |
++-----------------------------------+----------------------------------------------------------------------------+
+| Share data and ML models          | | ``$ dvc remote add myremote -d s3://mybucket/image_cnn``                 |
+|                                   | | ``$ dvc push``                                                           |
++-----------------------------------+----------------------------------------------------------------------------+
 
 Installation
 ============
@@ -182,20 +183,38 @@ Fedora / CentOS (rpm)
 Comparison to related technologies
 ==================================
 
+#. Data Engineering tools such as `AirFlow <https://airflow.apache.org/>`,
+   `Luigi <https://github.com/spotify/luigi>`, and others - in DVC data,
+   model and ML pipelines represent a single ML project focused on data
+   scientists' experience.  Data engineering tools orchestrate multiple data
+   projects and focus on efficient execution. A DVC project can be used from
+   existing data pipelines as a single execution step.
+
 #. `Git-annex <https://git-annex.branchable.com/>`_ - DVC uses the idea of storing the content of large files (which should
    not be in a Git repository) in a local key-value store, and uses file hardlinks/symlinks instead of
    copying/duplicating files.
 
-#. `Git-LFS <https://git-lfs.github.com/>`_ - DVC is compatible with any remote storage (S3, Google Cloud, Azure, SSH,
-   etc). DVC also uses reflinks or hardlinks to avoid copy operations on checkouts; thus handling large data files
-   much more efficiently.
+#. `Git-LFS <https://git-lfs.github.com/>`_ - DVC is compatible with many
+   remote storage services (S3, Google Cloud, Azure, SSH, etc). DVC also
+   uses reflinks or hardlinks to avoid copy operations on checkouts; thus
+   handling large data files much more efficiently.
 
-#. *Makefile* (and analogues including ad-hoc scripts) - DVC tracks dependencies (in a directed acyclic graph).
+#. Makefile (and analogues including ad-hoc scripts) - DVC tracks
+   dependencies (in a directed acyclic graph).
 
 #. `Workflow Management Systems <https://en.wikipedia.org/wiki/Workflow_management_system>`_ - DVC is a workflow
    management system designed specifically to manage machine learning experiments. DVC is built on top of Git.
 
-#. `DAGsHub <https://dagshub.com/>`_ - This is a Github equivalent for DVC. Pushing Git+DVC based repositories to DAGsHub will produce in a high level project dashboard; including DVC pipelines and metrics visualizations, as well as links to any DVC-managed files present in cloud storage.
+#. `DAGsHub <https://dagshub.com/>`_ - online service to host DVC
+   projects.  It provides a useful UI around DVC repositories and integrates
+   other tools.
+
+#. `DVC Studio <https://studio.iterative.ai/>`_ - official online
+   platform for DVC projects.  It can be used to manage data and models, run
+   and track experiments, and visualize and share results.  Also, it
+   integrates with `CML (CI/CD for ML) <https://cml.dev/>` for training
+   models in the cloud or Kubernetes.
+
 
 Contributing
 ============
@@ -203,7 +222,9 @@ Contributing
 |Maintainability| |Donate|
 
 Contributions are welcome! Please see our `Contributing Guide <https://dvc.org/doc/user-guide/contributing/core>`_ for more
-details.
+details. Thanks to all our contributors!
+
+|Contribs|
 
 Mailing List
 ============
@@ -232,10 +253,6 @@ Barrak, A., Eghan, E.E. and Adams, B. `On the Co-evolution of ML Pipelines and S
 .. |Banner| image:: https://dvc.org/img/logo-github-readme.png
    :target: https://dvc.org
    :alt: DVC logo
-
-.. |Release| image:: https://img.shields.io/badge/release-ok-brightgreen
-   :target: https://travis-ci.com/iterative/dvc/branches
-   :alt: Release
 
 .. |CI| image:: https://github.com/iterative/dvc/workflows/Tests/badge.svg?branch=master
    :target: https://github.com/iterative/dvc/actions
@@ -284,3 +301,7 @@ Barrak, A., Eghan, E.E. and Adams, B. `On the Co-evolution of ML Pipelines and S
 .. |Flowchart| image:: https://dvc.org/img/flow.gif
    :target: https://dvc.org/img/flow.gif
    :alt: how_dvc_works
+
+.. |Contribs| image:: https://contrib.rocks/image?repo=iterative/dvc
+   :target: https://github.com/iterative/dvc/graphs/contributors
+   :alt: Contributors

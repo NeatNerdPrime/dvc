@@ -1,12 +1,16 @@
 import json
 import logging
 import posixpath
+from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
 from funcy import cached_property
 
 from .errors import ObjectFormatError
 from .file import HashFile
 from .stage import get_file_hash
+
+if TYPE_CHECKING:
+    from dvc.hash_info import HashInfo
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +20,7 @@ class Tree(HashFile):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._dict = {}
+        self._dict: Dict[Tuple[str], "HashFile"] = {}
 
     @cached_property
     def trie(self):
@@ -24,31 +28,31 @@ class Tree(HashFile):
 
         return Trie(self._dict)
 
-    @property
-    def size(self):
-        try:
-            return sum(obj.size for _, obj in self)
-        except TypeError:
-            return None
-
     def add(self, key, obj):
         self.__dict__.pop("trie", None)
         self._dict[key] = obj
 
-    def digest(self):
+    def digest(self, hash_info: Optional["HashInfo"] = None):
         from dvc.fs.memory import MemoryFileSystem
-        from dvc.path_info import PathInfo
+        from dvc.path_info import CloudURLInfo
         from dvc.utils import tmp_fname
 
-        memfs = MemoryFileSystem(None, {})
-        path_info = PathInfo(tmp_fname(""))
+        memfs = MemoryFileSystem()
+        path_info = CloudURLInfo("memory://{}".format(tmp_fname("")))
         with memfs.open(path_info, "wb") as fobj:
             fobj.write(self.as_bytes())
         self.fs = memfs
         self.path_info = path_info
-        self.hash_info = get_file_hash(path_info, memfs, "md5")
-        self.hash_info.value += ".dir"
-        self.hash_info.size = self.size
+        if hash_info:
+            self.hash_info = hash_info
+        else:
+            self.hash_info = get_file_hash(path_info, memfs, "md5")
+            assert self.hash_info.value
+            self.hash_info.value += ".dir"
+        try:
+            self.hash_info.size = sum(obj.size for _, obj in self)
+        except TypeError:
+            self.hash_info.size = None
         self.hash_info.nfiles = len(self)
 
     def __len__(self):
@@ -96,7 +100,6 @@ class Tree(HashFile):
 
     @classmethod
     def load(cls, odb, hash_info):
-
         obj = odb.get(hash_info)
 
         try:
@@ -115,24 +118,46 @@ class Tree(HashFile):
         tree = cls.from_list(raw)
         tree.path_info = obj.path_info
         tree.fs = obj.fs
+        for _, entry_obj in tree:
+            entry_obj.fs = obj.fs
         tree.hash_info = hash_info
 
         return tree
 
-    def filter(self, odb, prefix):
+    def filter(self, prefix: Tuple[str]) -> Optional["Tree"]:
+        """Return a filtered copy of this tree that only contains entries
+        inside prefix.
+
+        The returned tree will contain the original tree's hash_info and
+        path_info.
+
+        Returns an empty tree if no object exists at the specified prefix.
+        """
+        tree = Tree(self.path_info, self.fs, self.hash_info)
+        try:
+            for key, obj in self.trie.items(prefix):
+                tree.add(key, obj)
+        except KeyError:
+            pass
+        return tree
+
+    def get(self, prefix: Tuple[str]) -> Optional[HashFile]:
+        """Return object at the specified prefix in this tree.
+
+        Returns None if no object exists at the specified prefix.
+        """
         obj = self._dict.get(prefix)
         if obj:
             return obj
 
-        depth = len(prefix)
         tree = Tree(None, None, None)
+        depth = len(prefix)
         try:
             for key, obj in self.trie.items(prefix):
                 tree.add(key[depth:], obj)
         except KeyError:
             return None
         tree.digest()
-        odb.add(tree.path_info, tree.fs, tree.hash_info)
         return tree
 
 
@@ -198,7 +223,7 @@ def merge(odb, ancestor_info, our_info, their_info):
     our = load(odb, our_info)
     their = load(odb, their_info)
 
-    merged_dict = _merge(ancestor.as_dict(), our.as_dict(), their.as_dict(),)
+    merged_dict = _merge(ancestor.as_dict(), our.as_dict(), their.as_dict())
 
     merged = Tree(None, None, None)
     for key, hi in merged_dict.items():

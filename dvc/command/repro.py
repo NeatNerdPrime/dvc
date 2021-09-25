@@ -1,27 +1,27 @@
 import argparse
-import logging
 
 from dvc.command import completion
 from dvc.command.base import CmdBase, append_doc_link
-from dvc.command.metrics import _show_metrics
 from dvc.command.status import CmdDataStatus
-
-logger = logging.getLogger(__name__)
 
 
 class CmdRepro(CmdBase):
     def run(self):
+        from dvc.ui import ui
+
         stages = self.repo.reproduce(**self._repro_kwargs)
         if len(stages) == 0:
-            logger.info(CmdDataStatus.UP_TO_DATE_MSG)
+            ui.write(CmdDataStatus.UP_TO_DATE_MSG)
         else:
-            logger.info(
+            ui.write(
                 "Use `dvc push` to send your updates to " "remote storage."
             )
 
         if self.args.metrics:
+            from dvc.compare import show_metrics
+
             metrics = self.repo.metrics.show()
-            logger.info(_show_metrics(metrics))
+            show_metrics(metrics)
 
         return 0
 

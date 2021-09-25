@@ -16,7 +16,7 @@ from .gs import (  # noqa: F401; noqa: F401
 )
 from .hdfs import HDFS, hadoop, hdfs, hdfs_server, real_hdfs  # noqa: F401
 from .http import HTTP, http, http_server  # noqa: F401
-from .local import Local, local_cloud, local_remote  # noqa: F401
+from .local import Local, local_cloud, local_remote, make_local  # noqa: F401
 from .oss import (  # noqa: F401
     OSS,
     TEST_OSS_REPO_BUCKET,
@@ -24,13 +24,15 @@ from .oss import (  # noqa: F401
     oss_server,
     real_oss,
 )
-from .s3 import S3, TEST_AWS_REPO_BUCKET, real_s3, s3  # noqa: F401
-from .ssh import (  # noqa: F401; noqa: F401
-    SSHMocked,
-    ssh,
-    ssh_connection,
-    ssh_server,
+from .s3 import (  # noqa: F401
+    S3,
+    TEST_AWS_REPO_BUCKET,
+    real_s3,
+    s3,
+    s3_fake_creds_file,
+    s3_server,
 )
+from .ssh import SSH, ssh, ssh_connection, ssh_server  # noqa: F401; noqa: F401
 from .webdav import Webdav, webdav, webdav_server  # noqa: F401
 from .webhdfs import WebHDFS, real_webhdfs, webhdfs  # noqa: F401
 
@@ -80,7 +82,7 @@ def docker_services(
     from pytest_docker.plugin import DockerComposeExecutor, Services
 
     executor = DockerComposeExecutor(
-        docker_compose_file, docker_compose_project_name,
+        docker_compose_file, docker_compose_project_name
     )
 
     # making sure we don't accidentally launch docker-compose in parallel,
@@ -91,6 +93,24 @@ def docker_services(
         executor.execute("up --build -d")
 
     return Services(executor)
+
+
+@pytest.fixture
+def make_cloud(request):
+    def _make_cloud(typ):
+        return request.getfixturevalue(f"make_{typ}")()
+
+    return _make_cloud
+
+
+@pytest.fixture
+def make_remote(tmp_dir, dvc, make_cloud):
+    def _make_remote(name, typ="local", **kwargs):
+        cloud = make_cloud(typ)
+        tmp_dir.add_remote(name=name, config=cloud.config, **kwargs)
+        return cloud
+
+    return _make_remote
 
 
 @pytest.fixture

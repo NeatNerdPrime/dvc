@@ -1,16 +1,16 @@
+import errno
 import logging
 import os
 import posixpath
 import shutil
 import threading
 from contextlib import contextmanager
-from urllib.parse import urlparse
 
 from funcy import cached_property, wrap_prop
 
 from dvc.hash_info import HashInfo
 from dvc.path_info import CloudURLInfo
-from dvc.progress import Tqdm
+from dvc.progress import DEFAULT_CALLBACK
 from dvc.scheme import Schemes
 
 from .base import BaseFileSystem
@@ -30,32 +30,42 @@ def update_pbar(pbar, total):
     return update
 
 
-class WebHDFSFileSystem(BaseFileSystem):
+def update_callback(callback, total):
+    def update(_, bytes_transfered):
+        if bytes_transfered == -1:
+            return callback.absolute_update(total)
+        return callback.relative_update(bytes_transfered)
+
+    return update
+
+
+class WebHDFSFileSystem(BaseFileSystem):  # pylint:disable=abstract-method
     scheme = Schemes.WEBHDFS
     PATH_CLS = CloudURLInfo
     REQUIRES = {"hdfs": "hdfs"}
     PARAM_CHECKSUM = "checksum"
     TRAVERSE_PREFIX_LEN = 2
 
-    def __init__(self, repo, config):
-        super().__init__(repo, config)
+    def __init__(self, **config):
+        super().__init__(**config)
 
-        self.path_info = None
-        url = config.get("url")
-        if not url:
-            return
-
-        self.path_info = self.PATH_CLS(url)
-
-        parsed = urlparse(url)
-
-        self.host = parsed.hostname
-        self.user = parsed.username or config.get("user")
-        self.port = parsed.port
+        self.host = config["host"]
+        self.user = config.get("user")
+        self.port = config.get("port")
 
         self.hdfscli_config = config.get("hdfscli_config")
         self.token = config.get("webhdfs_token")
         self.alias = config.get("webhdfs_alias")
+
+    @staticmethod
+    def _get_kwargs_from_urls(urlpath):
+        from fsspec.implementations.webhdfs import WebHDFS
+
+        return (
+            WebHDFS._get_kwargs_from_urls(  # pylint:disable=protected-access
+                urlpath
+            )
+        )
 
     @wrap_prop(threading.Lock())
     @cached_property
@@ -114,7 +124,7 @@ class WebHDFSFileSystem(BaseFileSystem):
 
         self.hdfs_client.delete(path_info.path)
 
-    def exists(self, path_info, use_dvcignore=True):
+    def exists(self, path_info) -> bool:
         assert not isinstance(path_info, list)
         assert path_info.scheme == "webhdfs"
 
@@ -122,14 +132,19 @@ class WebHDFSFileSystem(BaseFileSystem):
         return status is not None
 
     def info(self, path_info):
-        st = self.hdfs_client.status(path_info.path)
-        return {"size": st["length"]}
+        st = self.hdfs_client.status(path_info.path, strict=False)
+        if not st:
+            raise FileNotFoundError(
+                errno.ENOENT, os.strerror(errno.ENOENT), path_info.path
+            )
+        return {"size": st["length"], "type": "file"}
 
     def checksum(self, path_info):
+        size = self.info(path_info)["size"]
         return HashInfo(
             "checksum",
             self.hdfs_client.checksum(path_info.path)["bytes"],
-            size=self.hdfs_client.status(path_info.path)["length"],
+            size=size,
         )
 
     def copy(self, from_info, to_info, **_kwargs):
@@ -141,31 +156,31 @@ class WebHDFSFileSystem(BaseFileSystem):
         self.hdfs_client.makedirs(to_info.parent.path)
         self.hdfs_client.rename(from_info.path, to_info.path)
 
-    def _upload_fobj(self, fobj, to_info):
+    def upload_fobj(self, fobj, to_info, **kwargs):
         with self.hdfs_client.write(to_info.path) as fdest:
             shutil.copyfileobj(fobj, fdest)
 
-    def _upload(
-        self, from_file, to_info, name=None, no_progress_bar=False, **_kwargs
+    def put_file(
+        self, from_file, to_info, callback=DEFAULT_CALLBACK, **kwargs
     ):
         total = os.path.getsize(from_file)
-        with Tqdm(
-            desc=name, total=total, disable=no_progress_bar, bytes=True
-        ) as pbar:
-            self.hdfs_client.upload(
-                to_info.path,
-                from_file,
-                overwrite=True,
-                progress=update_pbar(pbar, total),
-            )
+        callback.set_size(total)
 
-    def _download(
-        self, from_info, to_file, name=None, no_progress_bar=False, **_kwargs
+        self.hdfs_client.makedirs(to_info.parent.path)
+        return self.hdfs_client.upload(
+            to_info.path,
+            from_file,
+            overwrite=True,
+            progress=update_callback(callback, total),
+        )
+
+    def get_file(
+        self, from_info, to_file, callback=DEFAULT_CALLBACK, **kwargs
     ):
         total = self.getsize(from_info)
-        with Tqdm(
-            desc=name, total=total, disable=no_progress_bar, bytes=True
-        ) as pbar:
-            self.hdfs_client.download(
-                from_info.path, to_file, progress=update_pbar(pbar, total)
-            )
+        if total:
+            callback.set_size(total)
+
+        self.hdfs_client.download(
+            from_info.path, to_file, progress=update_callback(callback, total)
+        )

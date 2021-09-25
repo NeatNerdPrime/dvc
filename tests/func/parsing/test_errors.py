@@ -10,7 +10,6 @@ from dvc.parsing import ResolveError
 from dvc.parsing.context import Context
 from dvc.parsing.interpolate import embrace
 from dvc.utils.humanize import join
-from dvc.utils.serialize import dump_yaml
 
 from . import make_entry_definition, make_foreach_def
 
@@ -133,7 +132,7 @@ def test_interpolate_non_string(tmp_dir, dvc):
 
 
 def test_partial_vars_doesnot_exist(tmp_dir, dvc):
-    dump_yaml("test_params.yaml", {"sub1": "sub1", "sub2": "sub2"})
+    (tmp_dir / "test_params.yaml").dump({"sub1": "sub1", "sub2": "sub2"})
 
     definition = make_entry_definition(
         tmp_dir,
@@ -180,7 +179,7 @@ def test_foreach_data_key_does_not_exists(tmp_dir, dvc, key):
 
 
 @pytest.mark.parametrize(
-    "foreach_data", ["${foo}", "${dct.model1}", "${lst.0}", "foobar"],
+    "foreach_data", ["${foo}", "${dct.model1}", "${lst.0}", "foobar"]
 )
 def test_foreach_data_expects_list_or_dict(tmp_dir, dvc, foreach_data):
     context = Context(
@@ -208,7 +207,7 @@ def test_foreach_overwriting_item_in_list(
 ):
     context = Context(global_data)
     definition = make_foreach_def(
-        tmp_dir, "build", {"model1": 10, "model2": 5}, {}, context,
+        tmp_dir, "build", {"model1": 10, "model2": 5}, {}, context
     )
     with caplog.at_level(logging.WARNING, logger="dvc.parsing"):
         definition.resolve_all()
@@ -221,7 +220,7 @@ def test_foreach_overwriting_item_in_list(
 
 def test_foreach_do_syntax_errors(tmp_dir, dvc):
     definition = make_foreach_def(
-        tmp_dir, "build", ["foo", "bar"], {"cmd": "echo ${syntax.[error}"},
+        tmp_dir, "build", ["foo", "bar"], {"cmd": "echo ${syntax.[error}"}
     )
 
     with pytest.raises(ResolveError) as exc_info:
@@ -281,7 +280,7 @@ def test_item_key_in_generated_stage_vars(tmp_dir, dvc, redefine, from_file):
     context = Context(foo="bar")
     vars_ = [redefine]
     if from_file:
-        dump_yaml("test_params.yaml", redefine)
+        (tmp_dir / "test_params.yaml").dump(redefine)
         vars_ = ["test_params.yaml"]
 
     definition = make_foreach_def(

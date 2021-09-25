@@ -3,6 +3,7 @@ import os
 import pickle
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
+from dataclasses import dataclass
 from functools import partial
 from typing import (
     TYPE_CHECKING,
@@ -15,8 +16,10 @@ from typing import (
 
 from funcy import cached_property
 
+from dvc.env import DVC_EXP_AUTO_PUSH, DVC_EXP_GIT_REMOTE
 from dvc.exceptions import DvcException
 from dvc.path_info import PathInfo
+from dvc.repo import Repo
 from dvc.repo.experiments.base import (
     EXEC_BASELINE,
     EXEC_BRANCH,
@@ -35,7 +38,7 @@ from dvc.scm import SCM
 from dvc.stage import PipelineStage
 from dvc.stage.monitor import CheckpointKilledError
 from dvc.stage.serialize import to_lockfile
-from dvc.utils import dict_sha256
+from dvc.utils import dict_sha256, env2bool
 from dvc.utils.fs import remove
 
 if TYPE_CHECKING:
@@ -52,6 +55,36 @@ class ExecutorResult(NamedTuple):
     force: bool
 
 
+@dataclass
+class ExecutorInfo:
+    PARAM_PID = "pid"
+    PARAM_GIT_URL = "git"
+    PARAM_BASELINE_REV = "baseline"
+    PARAM_LOCATION = "location"
+
+    pid: Optional[int]
+    git_url: Optional[str]
+    baseline_rev: Optional[str]
+    location: Optional[str]
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls(
+            d.get(cls.PARAM_PID),
+            d.get(cls.PARAM_GIT_URL),
+            d.get(cls.PARAM_BASELINE_REV),
+            d.get(cls.PARAM_LOCATION),
+        )
+
+    def to_dict(self):
+        return {
+            self.PARAM_PID: self.pid,
+            self.PARAM_GIT_URL: self.git_url,
+            self.PARAM_BASELINE_REV: self.baseline_rev,
+            self.PARAM_LOCATION: self.location,
+        }
+
+
 class BaseExecutor(ABC):
     """Base class for executing experiments in parallel.
 
@@ -66,6 +99,8 @@ class BaseExecutor(ABC):
     PACKED_ARGS_FILE = "repro.dat"
     WARN_UNTRACKED = False
     QUIET = False
+    PIDFILE_EXT = ".run"
+    DEFAULT_LOCATION: Optional[str] = "workspace"
 
     def __init__(
         self,
@@ -161,9 +196,11 @@ class BaseExecutor(ABC):
             data = pickle.load(fobj)
         return data["args"], data["kwargs"]
 
+    @classmethod
     def fetch_exps(
-        self,
+        cls,
         dest_scm: "Git",
+        url: str,
         force: bool = False,
         on_diverged: Callable[[str, bool], None] = None,
     ) -> Iterable[str]:
@@ -171,44 +208,60 @@ class BaseExecutor(ABC):
 
         Args:
             dest_scm: Destination Git instance.
+            url: Git remote URL to fetch from.
             force: If True, diverged refs will be overwritten
             on_diverged: Callback in the form on_diverged(ref, is_checkpoint)
                 to be called when an experiment ref has diverged.
         """
         refs = []
-        for ref in self.scm.iter_refs(base=EXPS_NAMESPACE):
-            if not ref.startswith(EXEC_NAMESPACE) and ref != EXPS_STASH:
+        has_checkpoint = False
+        for ref in dest_scm.iter_remote_refs(url, base=EXPS_NAMESPACE):
+            if ref == EXEC_CHECKPOINT:
+                has_checkpoint = True
+            elif not ref.startswith(EXEC_NAMESPACE) and ref != EXPS_STASH:
                 refs.append(ref)
 
         def on_diverged_ref(orig_ref: str, new_rev: str):
             if force:
-                logger.debug(
-                    "Replacing existing experiment '%s'", orig_ref,
-                )
+                logger.debug("Replacing existing experiment '%s'", orig_ref)
                 return True
 
-            checkpoint = self.scm.get_ref(EXEC_CHECKPOINT) is not None
-            self._raise_ref_conflict(dest_scm, orig_ref, new_rev, checkpoint)
+            cls._raise_ref_conflict(
+                dest_scm, orig_ref, new_rev, has_checkpoint
+            )
             if on_diverged:
-                on_diverged(orig_ref, checkpoint)
+                on_diverged(orig_ref, has_checkpoint)
             logger.debug("Reproduced existing experiment '%s'", orig_ref)
             return False
 
         # fetch experiments
         dest_scm.fetch_refspecs(
-            self.git_url,
+            url,
             [f"{ref}:{ref}" for ref in refs],
             on_diverged=on_diverged_ref,
             force=force,
         )
         # update last run checkpoint (if it exists)
-        if self.scm.get_ref(EXEC_CHECKPOINT):
+        if has_checkpoint:
             dest_scm.fetch_refspecs(
-                self.git_url,
+                url,
                 [f"{EXEC_CHECKPOINT}:{EXEC_CHECKPOINT}"],
                 force=True,
             )
         return refs
+
+    @classmethod
+    def _validate_remotes(cls, dvc: "Repo", git_remote: Optional[str]):
+
+        if git_remote == dvc.root_dir:
+            logger.warning(
+                f"'{git_remote}' points to the current Git repo, experiment "
+                "Git refs will not be pushed. But DVC cache and run cache "
+                "will automatically be pushed to the default DVC remote "
+                "(if any) on each experiment commit."
+            )
+        dvc.scm.validate_git_remote(git_remote)
+        dvc.cloud.get_remote_odb()
 
     @classmethod
     def reproduce(
@@ -220,6 +273,7 @@ class BaseExecutor(ABC):
         name: Optional[str] = None,
         log_errors: bool = True,
         log_level: Optional[int] = None,
+        **kwargs,
     ) -> "ExecutorResult":
         """Run dvc repro and return the result.
 
@@ -230,6 +284,9 @@ class BaseExecutor(ABC):
         """
         from dvc.repo.checkout import checkout as dvc_checkout
         from dvc.repo.reproduce import reproduce as dvc_reproduce
+
+        auto_push = env2bool(DVC_EXP_AUTO_PUSH)
+        git_remote = os.getenv(DVC_EXP_GIT_REMOTE, None)
 
         unchanged = []
 
@@ -247,7 +304,15 @@ class BaseExecutor(ABC):
         exp_ref: Optional["ExpRefInfo"] = None
         repro_force: bool = False
 
-        with cls._repro_dvc(dvc_dir, rel_cwd, log_errors) as dvc:
+        with cls._repro_dvc(
+            dvc_dir,
+            rel_cwd,
+            log_errors,
+            **kwargs,
+        ) as dvc:
+            if auto_push:
+                cls._validate_remotes(dvc, git_remote)
+
             args, kwargs = cls._repro_args(dvc)
             if args:
                 targets: Optional[Union[list, str]] = args[0]
@@ -283,10 +348,12 @@ class BaseExecutor(ABC):
                     quiet=True,
                     allow_missing=True,
                     checkpoint_reset=checkpoint_reset,
+                    recursive=kwargs.get("recursive", False),
                 )
 
             checkpoint_func = partial(
                 cls.checkpoint_callback,
+                dvc,
                 dvc.scm,
                 name,
                 repro_force or checkpoint_reset,
@@ -317,6 +384,8 @@ class BaseExecutor(ABC):
                         force=repro_force,
                         checkpoint=is_checkpoint,
                     )
+                    if auto_push:
+                        cls._auto_push(dvc, dvc.scm, git_remote)
                 except UnchangedExperimentError:
                     pass
                 ref = dvc.scm.get_ref(EXEC_BRANCH, follow=False)
@@ -341,9 +410,15 @@ class BaseExecutor(ABC):
     @classmethod
     @contextmanager
     def _repro_dvc(
-        cls, dvc_dir: Optional[str], rel_cwd: Optional[str], log_errors: bool
+        cls,
+        dvc_dir: Optional[str],
+        rel_cwd: Optional[str],
+        log_errors: bool,
+        pidfile: Optional[str] = None,
+        git_url: Optional[str] = None,
+        **kwargs,
     ):
-        from dvc.repo import Repo
+        from dvc.utils.serialize import modify_yaml
 
         dvc = Repo(dvc_dir)
         if cls.QUIET:
@@ -356,6 +431,15 @@ class BaseExecutor(ABC):
                 os.chdir(dvc.root_dir)
         else:
             old_cwd = None
+        if pidfile is not None:
+            info = ExecutorInfo(
+                os.getpid(),
+                git_url,
+                dvc.scm.get_rev(),
+                cls.DEFAULT_LOCATION,
+            )
+            with modify_yaml(pidfile) as d:
+                d.update(info.to_dict())
         logger.debug("Running repro in '%s'", os.getcwd())
 
         try:
@@ -371,6 +455,8 @@ class BaseExecutor(ABC):
                 logger.exception("unexpected error")
             raise
         finally:
+            if pidfile is not None:
+                remove(pidfile)
             dvc.close()
             if old_cwd:
                 os.chdir(old_cwd)
@@ -388,9 +474,32 @@ class BaseExecutor(ABC):
             kwargs = {}
         return args, kwargs
 
+    @staticmethod
+    def _auto_push(
+        dvc: "Repo",
+        scm: "Git",
+        git_remote: Optional[str],
+        push_cache=True,
+        run_cache=True,
+    ):
+        branch = scm.get_ref(EXEC_BRANCH, follow=False)
+        try:
+            dvc.experiments.push(
+                git_remote,
+                branch,
+                push_cache=push_cache,
+                run_cache=run_cache,
+            )
+        except BaseException as exc:
+            logger.warning(
+                "Something went wrong while auto pushing experiment "
+                f"to the remote '{git_remote}': {exc}"
+            )
+
     @classmethod
     def checkpoint_callback(
         cls,
+        dvc: "Repo",
         scm: "Git",
         name: Optional[str],
         force: bool,
@@ -402,6 +511,10 @@ class BaseExecutor(ABC):
             exp_rev = cls.commit(
                 scm, exp_hash, exp_name=name, force=force, checkpoint=True
             )
+
+            if env2bool(DVC_EXP_AUTO_PUSH):
+                git_remote = os.getenv(DVC_EXP_GIT_REMOTE)
+                cls._auto_push(dvc, scm, git_remote)
             logger.info("Checkpoint experiment iteration '%s'.", exp_rev[:7])
         except UnchangedExperimentError:
             pass

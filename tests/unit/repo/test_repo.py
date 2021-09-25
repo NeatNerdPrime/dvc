@@ -4,6 +4,7 @@ import shutil
 import pytest
 
 from dvc.exceptions import OutputDuplicationError
+from dvc.hash_info import HashInfo
 from dvc.repo import NotDvcRepoError, Repo, locked
 
 
@@ -43,27 +44,19 @@ def test_find_outs_by_path_does_graph_checks(tmp_dir, dvc):
     "path",
     [os.path.join("dir", "subdir", "file"), os.path.join("dir", "subdir")],
 )
-def test_used_cache(tmp_dir, dvc, path):
-    from dvc.objects.db import NamedCache
-
+def test_used_objs(tmp_dir, dvc, path):
     tmp_dir.dvc_gen({"dir": {"subdir": {"file": "file"}, "other": "other"}})
-    expected = NamedCache.make(
-        "local", "70922d6bf66eb073053a82f77d58c536.dir", "dir"
-    )
-    expected.add_child_cache(
-        "70922d6bf66eb073053a82f77d58c536.dir",
-        NamedCache.make(
-            "local",
-            "8c7dd922ad47494fc02c388e12c00eac",
-            os.path.join("dir", "subdir", "file"),
-        ),
-    )
 
-    used_cache = dvc.used_cache([path])
-    assert (
-        used_cache._items == expected._items
-        and used_cache.external == expected.external
-    )
+    expected = {
+        HashInfo("md5", "70922d6bf66eb073053a82f77d58c536.dir"),
+        HashInfo("md5", "8c7dd922ad47494fc02c388e12c00eac"),
+    }
+
+    used = set()
+    for _, obj_ids in dvc.used_objs([path]).items():
+        used.update(obj_ids)
+
+    assert used == expected
 
 
 def test_locked(mocker):
@@ -84,7 +77,7 @@ def test_locked(mocker):
 
 def test_skip_graph_checks(tmp_dir, dvc, mocker, run_copy):
     # See https://github.com/iterative/dvc/issues/2671 for more info
-    mock_build_graph = mocker.patch("dvc.repo.build_graph")
+    mock_build_graph = mocker.patch("dvc.repo.index.Index.build_graph")
 
     # sanity check
     tmp_dir.gen("foo", "foo text")

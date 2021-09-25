@@ -7,24 +7,6 @@ from dvc.exceptions import DvcException
 from dvc.repo.experiments.utils import exp_refs_by_rev
 
 
-@pytest.fixture
-def git_upstream(tmp_dir, erepo_dir):
-    url = "file://{}".format(erepo_dir.resolve().as_posix())
-    tmp_dir.scm.gitpython.repo.create_remote("upstream", url)
-    erepo_dir.remote = "upstream"
-    erepo_dir.url = url
-    return erepo_dir
-
-
-@pytest.fixture
-def git_downstream(tmp_dir, erepo_dir):
-    url = "file://{}".format(tmp_dir.resolve().as_posix())
-    erepo_dir.scm.gitpython.repo.create_remote("upstream", url)
-    erepo_dir.remote = "upstream"
-    erepo_dir.url = url
-    return erepo_dir
-
-
 @pytest.mark.parametrize("use_url", [True, False])
 def test_push(tmp_dir, scm, dvc, git_upstream, exp_stage, use_url):
     from dvc.exceptions import InvalidArgumentError
@@ -270,3 +252,37 @@ def test_push_pull_cache(
         path = os.path.join(dvc.odb.local.cache_dir, hash_[:2], hash_[2:])
         assert os.path.exists(path)
         assert open(path).read() == str(x)
+
+
+def test_auth_error_list(tmp_dir, scm, dvc, http_auth_patch):
+    from dvc.scm.base import GitAuthError
+
+    with pytest.raises(
+        GitAuthError,
+        match=f"HTTP Git authentication is not supported: '{http_auth_patch}'",
+    ):
+        dvc.experiments.ls(git_remote=http_auth_patch)
+
+
+def test_auth_error_pull(tmp_dir, scm, dvc, http_auth_patch):
+    from dvc.scm.base import GitAuthError
+
+    with pytest.raises(
+        GitAuthError,
+        match=f"HTTP Git authentication is not supported: '{http_auth_patch}'",
+    ):
+        dvc.experiments.pull(http_auth_patch, "foo")
+
+
+def test_auth_error_push(tmp_dir, scm, dvc, exp_stage, http_auth_patch):
+    from dvc.scm.base import GitAuthError
+
+    results = dvc.experiments.run(exp_stage.addressing, params=["foo=2"])
+    exp = first(results)
+    ref_info = first(exp_refs_by_rev(scm, exp))
+
+    with pytest.raises(
+        GitAuthError,
+        match=f"HTTP Git authentication is not supported: '{http_auth_patch}'",
+    ):
+        dvc.experiments.push(http_auth_patch, ref_info.name)

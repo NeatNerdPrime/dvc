@@ -1,3 +1,5 @@
+from dvc.exceptions import FileTransferError, UploadError
+
 from ..utils import glob_targets
 from . import locked
 
@@ -24,7 +26,7 @@ def push(
 
     expanded_targets = glob_targets(targets, glob=glob)
 
-    used = self.used_cache(
+    used = self.used_objs(
         expanded_targets,
         all_branches=all_branches,
         all_tags=all_tags,
@@ -38,4 +40,12 @@ def push(
         revs=revs,
     )
 
-    return len(used_run_cache) + self.cloud.push(used, jobs, remote=remote)
+    pushed = len(used_run_cache)
+    for odb, obj_ids in used.items():
+        if odb and odb.read_only:
+            continue
+        try:
+            pushed += self.cloud.push(obj_ids, jobs, remote=remote, odb=odb)
+        except FileTransferError as exc:
+            raise UploadError(exc.amount)
+    return pushed

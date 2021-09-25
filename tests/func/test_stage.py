@@ -6,7 +6,7 @@ import pytest
 from dvc.dvcfile import SingleStageFile
 from dvc.fs.local import LocalFileSystem
 from dvc.main import main
-from dvc.output.local import LocalOutput
+from dvc.output import Output
 from dvc.repo import Repo, lock_repo
 from dvc.stage import PipelineStage, Stage
 from dvc.stage.exceptions import StageFileFormatError
@@ -55,15 +55,15 @@ def test_empty_list():
 
 def test_list():
     lst = [
-        {LocalOutput.PARAM_PATH: "foo", LocalFileSystem.PARAM_CHECKSUM: "123"},
-        {LocalOutput.PARAM_PATH: "bar", LocalFileSystem.PARAM_CHECKSUM: None},
-        {LocalOutput.PARAM_PATH: "baz"},
+        {Output.PARAM_PATH: "foo", LocalFileSystem.PARAM_CHECKSUM: "123"},
+        {Output.PARAM_PATH: "bar", LocalFileSystem.PARAM_CHECKSUM: None},
+        {Output.PARAM_PATH: "baz"},
     ]
     d = {Stage.PARAM_DEPS: lst}
     SingleStageFile.validate(d)
 
-    lst[0][LocalOutput.PARAM_CACHE] = True
-    lst[1][LocalOutput.PARAM_CACHE] = False
+    lst[0][Output.PARAM_CACHE] = True
+    lst[1][Output.PARAM_CACHE] = False
     d = {Stage.PARAM_OUTS: lst}
     SingleStageFile.validate(d)
 
@@ -168,34 +168,34 @@ def test_meta_is_preserved(tmp_dir, dvc):
     (stage,) = tmp_dir.dvc_gen("foo", "foo content")
 
     # Add meta to DVC-file
-    data = load_yaml(stage.path)
+    data = (tmp_dir / stage.path).parse()
     data["meta"] = {"custom_key": 42}
-    dump_yaml(stage.path, data)
+    (tmp_dir / stage.path).dump(data)
 
     # Loading and dumping to test that it works and meta is retained
     dvcfile = SingleStageFile(dvc, stage.path)
     new_stage = dvcfile.stage
     dvcfile.dump(new_stage)
 
-    new_data = load_yaml(stage.path)
+    new_data = (tmp_dir / stage.path).parse()
     assert new_data["meta"] == data["meta"]
 
 
 def test_desc_is_preserved(tmp_dir, dvc):
     (stage,) = tmp_dir.dvc_gen("foo", "foo content")
 
-    data = load_yaml(stage.path)
+    data = (tmp_dir / stage.path).parse()
     stage_desc = "test stage description"
     out_desc = "test out description"
     data["desc"] = stage_desc
     data["outs"][0]["desc"] = out_desc
-    dump_yaml(stage.path, data)
+    (tmp_dir / stage.path).dump(data)
 
     dvcfile = SingleStageFile(dvc, stage.path)
     new_stage = dvcfile.stage
     dvcfile.dump(new_stage)
 
-    new_data = load_yaml(stage.path)
+    new_data = (tmp_dir / stage.path).parse()
     assert new_data["desc"] == stage_desc
     assert new_data["outs"][0]["desc"] == out_desc
 
@@ -216,6 +216,8 @@ def test_parent_repo_collect_stages(tmp_dir, scm, dvc):
         deep_subrepo_dir.gen("subrepo_file", "subrepo file content")
         deep_subrepo.add("subrepo_file")
 
+    dvc._reset()
+
     stages = dvc.stage.collect(None)
     subrepo_stages = subrepo.stage.collect(None)
     deep_subrepo_stages = deep_subrepo.stage.collect(None)
@@ -223,6 +225,13 @@ def test_parent_repo_collect_stages(tmp_dir, scm, dvc):
     assert stages == []
     assert subrepo_stages != []
     assert deep_subrepo_stages != []
+
+
+def test_collect_repo_ignored_dir_unignored_pattern(tmp_dir, dvc, scm):
+    tmp_dir.gen({".gitignore": "data/**\n!data/**/\n!data/**/*.dvc"})
+    scm.add([".gitignore"])
+    (stage,) = tmp_dir.dvc_gen({"data/raw/tracked.csv": "5,6,7,8"})
+    assert dvc.stage.collect_repo() == [stage]
 
 
 def test_stage_strings_representation(tmp_dir, dvc, run_copy):

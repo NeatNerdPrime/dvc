@@ -1,9 +1,7 @@
 import logging
 
 from dvc.exceptions import InvalidArgumentError
-from dvc.objects.db import NamedCache
 
-from ..scheme import Schemes
 from . import locked
 
 logger = logging.getLogger(__name__)
@@ -46,43 +44,45 @@ def gc(
 
     from contextlib import ExitStack
 
+    from dvc.objects.db import get_index
     from dvc.repo import Repo
 
     if not repos:
         repos = []
     all_repos = [Repo(path) for path in repos]
 
+    used_obj_ids = set()
     with ExitStack() as stack:
         for repo in all_repos:
             stack.enter_context(repo.lock)
 
-        used = NamedCache()
         for repo in all_repos + [self]:
-            used.update(
-                repo.used_cache(
-                    all_branches=all_branches,
-                    with_deps=with_deps,
-                    all_tags=all_tags,
-                    all_commits=all_commits,
-                    all_experiments=all_experiments,
-                    remote=remote,
-                    force=force,
-                    jobs=jobs,
-                )
-            )
+            for obj_ids in repo.used_objs(
+                all_branches=all_branches,
+                with_deps=with_deps,
+                all_tags=all_tags,
+                all_commits=all_commits,
+                all_experiments=all_experiments,
+                remote=remote,
+                force=force,
+                jobs=jobs,
+            ).values():
+                used_obj_ids.update(obj_ids)
 
     for scheme, odb in self.odb.by_scheme():
         if not odb:
             continue
 
-        removed = odb.gc(set(used.scheme_keys(scheme)), jobs=jobs)
+        removed = odb.gc(used_obj_ids, jobs=jobs)
         if not removed:
             logger.info(f"No unused '{scheme}' cache to remove.")
 
     if not cloud:
         return
 
-    remote = self.cloud.get_remote(remote, "gc -c")
-    removed = remote.gc(set(used.scheme_keys(Schemes.LOCAL)), jobs=jobs)
-    if not removed:
+    odb = self.cloud.get_remote_odb(remote, "gc -c")
+    removed = odb.gc(used_obj_ids)
+    if removed:
+        get_index(odb).clear()
+    else:
         logger.info("No unused cache to remove from remote.")

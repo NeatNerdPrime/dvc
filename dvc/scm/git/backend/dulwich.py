@@ -20,13 +20,15 @@ from funcy import cached_property
 
 from dvc.path_info import PathInfo
 from dvc.progress import Tqdm
-from dvc.scm.base import SCMError
+from dvc.scm.base import GitAuthError, InvalidRemoteSCMRepo, SCMError
 from dvc.utils import relpath
 
 from ..objects import GitObject
 from .base import BaseGitBackend
 
 if TYPE_CHECKING:
+    from dvc.types import StrPath
+
     from ..objects import GitCommit
 
 logger = logging.getLogger(__name__)
@@ -37,7 +39,7 @@ class DulwichObject(GitObject):
         self.repo = repo
         self._name = name
         self._mode = mode
-        self.sha = sha
+        self._sha = sha
 
     def open(self, mode: str = "r", encoding: str = None):
         if not encoding:
@@ -65,6 +67,14 @@ class DulwichObject(GitObject):
             yield DulwichObject(
                 self.repo, entry.path.decode(), entry.mode, entry.sha
             )
+
+    @property
+    def size(self) -> int:
+        return len(self.repo[self.sha].as_raw_string())
+
+    @property
+    def sha(self) -> str:
+        return self._sha
 
 
 class DulwichBackend(BaseGitBackend):  # pylint:disable=abstract-method
@@ -278,12 +288,14 @@ class DulwichBackend(BaseGitBackend):  # pylint:disable=abstract-method
 
         return IgnoreFilterManager.from_repo(self.repo)
 
-    def is_ignored(self, path: str) -> bool:
+    def is_ignored(self, path: "StrPath") -> bool:
         # `is_ignored` returns `false` if excluded in `.gitignore` and
         # `None` if it's not mentioned at all. `True` if it is ignored.
-        return bool(
-            self.ignore_manager.is_ignored(relpath(path, self.root_dir))
-        )
+        relative_path = relpath(path, self.root_dir)
+        # if checking a directory, a trailing slash must be included
+        if str(path)[-1] == os.sep:
+            relative_path += os.sep
+        return bool(self.ignore_manager.is_ignored(relative_path))
 
     def set_ref(
         self,
@@ -343,25 +355,29 @@ class DulwichBackend(BaseGitBackend):  # pylint:disable=abstract-method
                 yield os.fsdecode(key)
 
     def iter_remote_refs(self, url: str, base: Optional[str] = None):
-        from dulwich.client import get_transport_and_path
+        from dulwich.client import HTTPUnauthorized, get_transport_and_path
+        from dulwich.errors import NotGitRepository
         from dulwich.porcelain import get_remote_repo
 
         try:
             _remote, location = get_remote_repo(self.repo, url)
             client, path = get_transport_and_path(location)
         except Exception as exc:
-            raise SCMError(
-                f"'{url}' is not a valid Git remote or URL"
-            ) from exc
+            raise InvalidRemoteSCMRepo(url) from exc
 
-        if base:
-            yield from (
-                os.fsdecode(ref)
-                for ref in client.get_refs(path)
-                if ref.startswith(os.fsencode(base))
-            )
-        else:
-            yield from (os.fsdecode(ref) for ref in client.get_refs(path))
+        try:
+            if base:
+                yield from (
+                    os.fsdecode(ref)
+                    for ref in client.get_refs(path)
+                    if ref.startswith(os.fsencode(base))
+                )
+            else:
+                yield from (os.fsdecode(ref) for ref in client.get_refs(path))
+        except NotGitRepository as exc:
+            raise InvalidRemoteSCMRepo(url) from exc
+        except HTTPUnauthorized:
+            raise GitAuthError(url)
 
     def get_refs_containing(self, rev: str, pattern: Optional[str] = None):
         raise NotImplementedError
@@ -374,7 +390,7 @@ class DulwichBackend(BaseGitBackend):  # pylint:disable=abstract-method
         force: bool = False,
         on_diverged: Optional[Callable[[str, str], bool]] = None,
     ):
-        from dulwich.client import get_transport_and_path
+        from dulwich.client import HTTPUnauthorized, get_transport_and_path
         from dulwich.errors import NotGitRepository, SendPackError
         from dulwich.porcelain import (
             DivergedBranches,
@@ -393,9 +409,11 @@ class DulwichBackend(BaseGitBackend):  # pylint:disable=abstract-method
             ) from exc
 
         def update_refs(refs):
+            from dulwich.objects import ZERO_SHA
+
             new_refs = {}
             for ref, value in zip(dest_refs, values):
-                if ref in refs:
+                if ref in refs and value != ZERO_SHA:
                     local_sha = self.repo.refs[ref]
                     remote_sha = refs[ref]
                     try:
@@ -405,7 +423,7 @@ class DulwichBackend(BaseGitBackend):  # pylint:disable=abstract-method
                             overwrite = False
                             if on_diverged:
                                 overwrite = on_diverged(
-                                    os.fsdecode(ref), os.fsdecode(remote_sha),
+                                    os.fsdecode(ref), os.fsdecode(remote_sha)
                                 )
                             if not overwrite:
                                 continue
@@ -431,6 +449,8 @@ class DulwichBackend(BaseGitBackend):  # pylint:disable=abstract-method
                 )
         except (NotGitRepository, SendPackError) as exc:
             raise SCMError("Git failed to push '{src}' to '{url}'") from exc
+        except HTTPUnauthorized:
+            raise GitAuthError(url)
 
     def _push_dest_refs(
         self, src: Optional[str], dest: str
@@ -638,3 +658,17 @@ class DulwichBackend(BaseGitBackend):  # pylint:disable=abstract-method
         squash: bool = False,
     ) -> Optional[str]:
         raise NotImplementedError
+
+    def validate_git_remote(self, url: str):
+        from dulwich.client import LocalGitClient, get_transport_and_path
+        from dulwich.porcelain import get_remote_repo
+
+        try:
+            _, location = get_remote_repo(self.repo, url)
+            client, path = get_transport_and_path(location)
+        except Exception as exc:
+            raise InvalidRemoteSCMRepo(url) from exc
+        if isinstance(client, LocalGitClient) and not os.path.exists(
+            os.path.join("", path)
+        ):
+            raise InvalidRemoteSCMRepo(url)

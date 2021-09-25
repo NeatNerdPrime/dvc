@@ -62,7 +62,7 @@ def test_plain_pager(mocker: MockerFixture):
 
 
 def test_plain_headerless(capsys: CaptureFixture[str]):
-    ui.table([("foo", "bar"), ("foo1", "bar1"), ("foo2", "bar2")],)
+    ui.table([("foo", "bar"), ("foo1", "bar1"), ("foo2", "bar2")])
     captured = capsys.readouterr()
     assert captured.out == textwrap.dedent(
         """\
@@ -88,7 +88,7 @@ def test_rich_simple(capsys: CaptureFixture[str]):
 
 def test_rich_headerless(capsys: CaptureFixture[str]):
     ui.table(
-        [("foo", "bar"), ("foo1", "bar1"), ("foo2", "bar2")], rich_table=True,
+        [("foo", "bar"), ("foo1", "bar1"), ("foo2", "bar2")], rich_table=True
     )
     captured = capsys.readouterr()
     assert [
@@ -119,6 +119,7 @@ def test_rich_border(capsys: CaptureFixture[str]):
     "extra_opts",
     [
         {"header_styles": [{"style": Style(bold=True)}]},
+        {"header_styles": {"first": {"style": Style(bold=True)}}},
         {"row_styles": [{"style": Style(bold=True)}]},
     ],
 )

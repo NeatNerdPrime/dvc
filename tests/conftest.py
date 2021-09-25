@@ -5,11 +5,14 @@ import pytest
 
 from .dir_helpers import *  # noqa, pylint: disable=wildcard-import
 from .remotes import *  # noqa, pylint: disable=wildcard-import
+from .utils.scriptify import scriptify
 
 # Prevent updater and analytics from running their processes
 os.environ["DVC_TEST"] = "true"
 # Ensure progress output even when not outputting to raw sys.stderr console
 os.environ["DVC_IGNORE_ISATTY"] = "true"
+# Disable system git config
+os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
 
 REMOTES = {
     # remote: enabled_by_default?
@@ -19,8 +22,8 @@ REMOTES = {
     "hdfs": False,
     "http": True,
     "oss": False,
-    "s3": True,
-    "ssh": True,
+    "s3": False,
+    "ssh": False,
     "webdav": True,
 }
 
@@ -111,6 +114,14 @@ def pytest_runtest_setup(item):
     for marker in item.iter_markers():
         item.config.dvc_config.apply_marker(marker)
 
+    if (
+        "CI" in os.environ
+        and item.get_closest_marker("needs_internet") is not None
+    ):
+        # remotes that need internet connection might be flaky,
+        # so we rerun them in case it fails.
+        item.add_marker(pytest.mark.flaky(max_runs=5, min_passes=1))
+
 
 @pytest.fixture(scope="session")
 def test_config(request):
@@ -145,3 +156,15 @@ def pytest_configure(config):
             enabled_remotes.discard(remote_name)
         if enabled:
             enabled_remotes.add(remote_name)
+
+
+@pytest.fixture()
+def custom_template(tmp_dir, dvc):
+    import shutil
+
+    template = tmp_dir / "custom_template.json"
+    shutil.copy(tmp_dir / ".dvc" / "plots" / "default.json", template)
+    return template
+
+
+scriptify_fixture = pytest.fixture(lambda: scriptify, name="scriptify")

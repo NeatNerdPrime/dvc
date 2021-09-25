@@ -6,7 +6,7 @@ import pytest
 from funcy import first
 
 from dvc import stage as stage_module
-from dvc.exceptions import MetricsError
+from dvc.render.utils import get_files
 
 LIVE_SCRIPT = dedent(
     """
@@ -113,26 +113,33 @@ def test_live_provides_metrics(tmp_dir, dvc, live_stage):
 
     assert (tmp_dir / "logs.json").is_file()
     assert dvc.metrics.show() == {
-        "": {"logs.json": {"step": 1, "loss": 0.5, "accuracy": 0.5}}
+        "": {
+            "data": {
+                "logs.json": {
+                    "data": {"accuracy": 0.5, "loss": 0.5, "step": 1}
+                }
+            }
+        }
     }
 
     assert (tmp_dir / "logs").is_dir()
-    plots = dvc.plots.show()
-    assert os.path.join("logs", "accuracy.tsv") in plots
-    assert os.path.join("logs", "loss.tsv") in plots
+    plots_data = dvc.plots.show()
+    files = get_files(plots_data)
+    assert os.path.join("logs", "accuracy.tsv") in files
+    assert os.path.join("logs", "loss.tsv") in files
 
 
 def test_live_provides_no_metrics(tmp_dir, dvc, live_stage):
     live_stage(summary=False, live="logs")
 
     assert not (tmp_dir / "logs.json").is_file()
-    with pytest.raises(MetricsError):
-        assert dvc.metrics.show() == {}
+    assert dvc.metrics.show() == {"": {}}
 
     assert (tmp_dir / "logs").is_dir()
-    plots = dvc.plots.show()
-    assert os.path.join("logs", "accuracy.tsv") in plots
-    assert os.path.join("logs", "loss.tsv") in plots
+    plots_data = dvc.plots.show()
+    files = get_files(plots_data)
+    assert os.path.join("logs", "accuracy.tsv") in files
+    assert os.path.join("logs", "loss.tsv") in files
 
 
 @pytest.mark.parametrize("typ", ("live", "live_no_cache"))
@@ -145,14 +152,17 @@ def test_experiments_track_summary(tmp_dir, scm, dvc, live_stage, typ):
     ((exp_rev, _),) = experiments.items()
 
     res = dvc.experiments.show()
-    assert "logs.json" in res[baseline_rev][exp_rev]["metrics"].keys()
+    assert "logs.json" in res[baseline_rev][exp_rev]["data"]["metrics"].keys()
 
 
 @pytest.mark.parametrize("html", [True, False])
 def test_live_html(tmp_dir, dvc, live_stage, html):
     live_stage(html=html, live="logs")
 
-    assert (tmp_dir / "logs.html").is_file() == html
+    assert (tmp_dir / "logs_dvc_plots" / "index.html").is_file() == html
+    if html:
+        html_text = (tmp_dir / "logs_dvc_plots" / "index.html").read_text()
+        assert 'http-equiv="refresh"' in html_text
 
 
 @pytest.fixture
@@ -194,7 +204,9 @@ def checkpoints_metric(show_results, metric_file, metric_name):
     tmp.pop("baseline")
     return list(
         map(
-            lambda exp: exp["metrics"][metric_file][metric_name],
+            lambda exp: exp["data"]["metrics"][metric_file]["data"][
+                metric_name
+            ],
             list(tmp.values()),
         )
     )
@@ -212,28 +224,13 @@ def test_live_checkpoints_resume(
     checkpoint_resume = first(results)
 
     dvc.experiments.run(
-        stage.addressing, checkpoint_resume=checkpoint_resume, tmp_dir=False,
+        stage.addressing, checkpoint_resume=checkpoint_resume, tmp_dir=False
     )
 
     results = dvc.experiments.show()
-    assert checkpoints_metric(results, "logs.json", "step") == [
-        3,
-        2,
-        1,
-        0,
-    ]
-    assert checkpoints_metric(results, "logs.json", "metric1") == [
-        4,
-        3,
-        2,
-        1,
-    ]
-    assert checkpoints_metric(results, "logs.json", "metric2") == [
-        8,
-        6,
-        4,
-        2,
-    ]
+    assert checkpoints_metric(results, "logs.json", "step") == [3, 2, 1, 0]
+    assert checkpoints_metric(results, "logs.json", "metric1") == [4, 3, 2, 1]
+    assert checkpoints_metric(results, "logs.json", "metric2") == [8, 6, 4, 2]
 
 
 def test_dvc_generates_html_during_run(tmp_dir, dvc, mocker, live_stage):
@@ -252,7 +249,7 @@ def test_dvc_generates_html_during_run(tmp_dir, dvc, mocker, live_stage):
         dvclive.log("accuracy", 1/2)
         dvclive.next_step()
         time.sleep({})""".format(
-            str(monitor_await_time * 2)
+            str(monitor_await_time * 10)
         )
     )
     live_stage(summary=True, live="logs", code=script)

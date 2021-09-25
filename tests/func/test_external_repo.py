@@ -1,19 +1,19 @@
 import os
-
-from mock import ANY, patch
+from unittest.mock import ANY, patch
 
 from dvc.external_repo import CLONES, external_repo
 from dvc.fs.local import LocalFileSystem
-from dvc.objects import save
 from dvc.objects.stage import stage
+from dvc.objects.transfer import transfer
 from dvc.path_info import PathInfo
 from dvc.scm.git import Git
 from dvc.utils import relpath
 from dvc.utils.fs import makedirs, remove
 from tests.unit.fs.test_repo import make_subrepo
+from tests.utils import clean_staging
 
 
-def test_external_repo(erepo_dir):
+def test_external_repo(erepo_dir, mocker):
     with erepo_dir.chdir():
         with erepo_dir.branch("branch", new=True):
             erepo_dir.dvc_gen("file", "branch", commit="create file on branch")
@@ -21,16 +21,17 @@ def test_external_repo(erepo_dir):
 
     url = os.fspath(erepo_dir)
 
-    with patch.object(Git, "clone", wraps=Git.clone) as mock:
-        with external_repo(url) as repo:
-            with repo.open_by_relpath("file") as fd:
-                assert fd.read() == "master"
+    mock = mocker.patch.object(Git, "clone", wraps=Git.clone)
 
-        with external_repo(url, rev="branch") as repo:
-            with repo.open_by_relpath("file") as fd:
-                assert fd.read() == "branch"
+    with external_repo(url) as repo:
+        with repo.open_by_relpath("file") as fd:
+            assert fd.read() == "master"
 
-        assert mock.call_count == 1
+    with external_repo(url, rev="branch") as repo:
+        with repo.open_by_relpath("file") as fd:
+            assert fd.read() == "branch"
+
+    assert mock.call_count == 1
 
 
 def test_source_change(erepo_dir):
@@ -52,7 +53,7 @@ def test_cache_reused(erepo_dir, mocker, local_cloud):
         erepo_dir.dvc_gen("file", "text", commit="add file")
     erepo_dir.dvc.push()
 
-    download_spy = mocker.spy(LocalFileSystem, "download_file")
+    download_spy = mocker.spy(LocalFileSystem, "upload")
 
     # Use URL to prevent any fishy optimizations
     url = f"file://{erepo_dir}"
@@ -94,7 +95,7 @@ def test_pull_subdir_file(tmp_dir, erepo_dir):
     dest = tmp_dir / "file"
     with external_repo(os.fspath(erepo_dir)) as repo:
         repo.repo_fs.download(
-            PathInfo(repo.root_dir) / "subdir" / "file", PathInfo(dest),
+            PathInfo(repo.root_dir) / "subdir" / "file", PathInfo(dest)
         )
 
     assert dest.is_file()
@@ -199,17 +200,24 @@ def test_subrepos_are_ignored(tmp_dir, erepo_dir):
         # clear cache to test saving to cache
         cache_dir = tmp_dir / repo.odb.local.cache_dir
         remove(cache_dir)
+        clean_staging()
         makedirs(cache_dir)
 
-        obj = stage(
+        staging, obj = stage(
             repo.odb.local,
             PathInfo(repo.root_dir) / "dir",
             repo.repo_fs,
             "md5",
-            follow_subrepos=False,
+            dvcignore=repo.dvcignore,
         )
-        save(repo.odb.local, obj)
-        assert set(cache_dir.glob("*/*")) == {
+        transfer(
+            staging,
+            repo.odb.local,
+            {obj.hash_info},
+            shallow=False,
+            move=True,
+        )
+        assert set(cache_dir.glob("??/*")) == {
             cache_dir / "e1" / "d9e8eae5374860ae025ec84cfd85c7.dir",
             cache_dir / "37" / "b51d194a7513e45b56f6524f2d51f2",
             cache_dir / "94" / "7d2b84e5aa88170e80dff467a5bfb6",

@@ -4,8 +4,6 @@ from collections import defaultdict
 from typing import Dict, List
 
 from dvc.exceptions import PathMissingError
-from dvc.objects.stage import get_file_hash
-from dvc.objects.stage import stage as ostage
 from dvc.repo import locked
 from dvc.repo.experiments.utils import fix_exp_head
 
@@ -46,7 +44,7 @@ def diff(self, a_rev="HEAD", b_rev=None, targets=None):
                 repo_fs, targets
             )
 
-        results[rev] = _paths_checksums(self, repo_fs, targets_path_infos)
+        results[rev] = _paths_checksums(self, targets_path_infos)
 
     if targets is not None:
         # check for overlapping missing targets between a_rev and b_rev
@@ -99,7 +97,7 @@ def diff(self, a_rev="HEAD", b_rev=None, targets=None):
     return ret if any(ret.values()) else {}
 
 
-def _paths_checksums(repo, repo_fs, targets):
+def _paths_checksums(repo, targets):
     """
     A dictionary of checksums addressed by relpaths collected from
     the current fs outputs.
@@ -111,11 +109,12 @@ def _paths_checksums(repo, repo_fs, targets):
         file:      "data"
     """
 
-    return dict(_output_paths(repo, repo_fs, targets))
+    return dict(_output_paths(repo, targets))
 
 
-def _output_paths(repo, repo_fs, targets):
+def _output_paths(repo, targets):
     from dvc.fs.local import LocalFileSystem
+    from dvc.objects.stage import stage as ostage
 
     on_working_fs = isinstance(repo.fs, LocalFileSystem)
 
@@ -131,42 +130,47 @@ def _output_paths(repo, repo_fs, targets):
             else os.path.join(str(output), "")
         )
 
-    def _to_checksum(output):
-        if on_working_fs:
-            return ostage(
-                repo.odb.local, output.path_info, repo.odb.local.fs, "md5",
-            ).hash_info.value
-        return output.hash_info.value
+    for output in repo.index.outs:
+        if _exists(output):
+            yield_output = targets is None or any(
+                output.path_info.isin_or_eq(target) for target in targets
+            )
 
-    for stage in repo.stages:
-        for output in stage.outs:
-            if _exists(output):
-                yield_output = targets is None or any(
-                    output.path_info.isin_or_eq(target) for target in targets
+            if on_working_fs:
+                _, obj = ostage(
+                    repo.odb.local,
+                    output.path_info,
+                    repo.odb.local.fs,
+                    "md5",
+                    dry_run=True,
+                    dvcignore=output.dvcignore,
                 )
+                hash_info = obj.hash_info
+            else:
+                hash_info = output.hash_info
+                obj = output.get_obj()
 
-                if yield_output:
-                    yield _to_path(output), _to_checksum(output)
+            if yield_output:
+                yield _to_path(output), hash_info.value
 
-                if output.is_dir_checksum and (
-                    yield_output
-                    or any(target.isin(output.path_info) for target in targets)
-                ):
-                    yield from _dir_output_paths(repo_fs, output, targets)
+            if not obj:
+                continue
 
-
-def _dir_output_paths(repo_fs, output, targets=None):
-    from dvc.config import NoRemoteError
-
-    try:
-        for fname in repo_fs.walk_files(output.path_info):
-            if targets is None or any(
-                fname.isin_or_eq(target) for target in targets
+            if output.is_dir_checksum and (
+                yield_output
+                or any(target.isin(output.path_info) for target in targets)
             ):
-                # pylint: disable=no-member
-                yield str(fname), get_file_hash(fname, repo_fs, "md5").value
-    except NoRemoteError:
-        logger.warning("dir cache entry for '%s' is missing", output)
+                yield from _dir_output_paths(output.path_info, obj, targets)
+
+
+def _dir_output_paths(path_info, obj, targets=None):
+    for key, entry_obj in obj:
+        fname = path_info.joinpath(*key)
+        if targets is None or any(
+            fname.isin_or_eq(target) for target in targets
+        ):
+            # pylint: disable=no-member
+            yield str(fname), entry_obj.hash_info.value
 
 
 def _filter_missing(repo_fs, paths):

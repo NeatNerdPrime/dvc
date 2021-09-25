@@ -1,14 +1,13 @@
-import contextlib
 import logging
 import os
 from typing import TYPE_CHECKING, List, Optional
 
-from dvc.exceptions import MetricDoesNotExistError, MetricsError
+from dvc.render.utils import render
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from dvc.output import BaseOutput
+    from dvc.output import Output
     from dvc.path_info import PathInfo
     from dvc.repo import Repo
 
@@ -18,19 +17,21 @@ def create_summary(out):
 
     metrics, plots = out.repo.live.show(str(out.path_info))
 
-    html_path = out.path_info.with_suffix(".html")
+    html_path = out.path_info.fspath + "_dvc_plots"
 
-    out.repo.plots.write_html(html_path, plots, metrics)
-    logger.info(f"\nfile://{os.path.abspath(html_path)}")
+    index_path = render(
+        out.repo, plots, metrics=metrics, path=html_path, refresh_seconds=5
+    )
+    logger.info(f"\nfile://{os.path.abspath(index_path)}")
 
 
-def summary_path_info(out: "BaseOutput") -> Optional["PathInfo"]:
-    from dvc.output import BaseOutput
+def summary_path_info(out: "Output") -> Optional["PathInfo"]:
+    from dvc.output import Output
 
     assert out.live
     has_summary = True
     if isinstance(out.live, dict):
-        has_summary = out.live.get(BaseOutput.PARAM_LIVE_SUMMARY, True)
+        has_summary = out.live.get(Output.PARAM_LIVE_SUMMARY, True)
     if has_summary:
         return out.path_info.with_suffix(".json")
     return None
@@ -44,15 +45,9 @@ class Live:
         if revs:
             revs = ["workspace", *revs]
 
-        if not os.path.exists(target):
-            raise MetricDoesNotExistError([target])
-
         metrics_path = target + ".json"
 
-        metrics = None
-        with contextlib.suppress(MetricsError):
-            metrics = self.repo.metrics.show(targets=[metrics_path])
-
+        metrics = self.repo.metrics.show(targets=[metrics_path])
         plots = self.repo.plots.show(target, recursive=True, revs=revs)
 
         return metrics, plots

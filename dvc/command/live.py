@@ -1,11 +1,9 @@
 import argparse
-import logging
-import os
+from pathlib import Path
 
 from dvc.command import completion
 from dvc.command.base import CmdBase, fix_subparsers
-
-logger = logging.getLogger(__name__)
+from dvc.ui import ui
 
 
 class CmdLive(CmdBase):
@@ -14,12 +12,14 @@ class CmdLive(CmdBase):
     def _run(self, target, revs=None):
         metrics, plots = self.repo.live.show(target=target, revs=revs)
 
-        html_path = self.args.target + ".html"
-        self.repo.plots.write_html(html_path, plots, metrics)
+        if plots:
+            html_path = Path.cwd() / (self.args.target + "_html")
+            from dvc.render.utils import render
 
-        logger.info(f"\nfile://{os.path.abspath(html_path)}")
-
-        return 0
+            index_path = render(self.repo, plots, metrics, html_path)
+            ui.write(index_path.as_uri())
+            return 0
+        return 1
 
 
 class CmdLiveShow(CmdLive):
@@ -35,7 +35,7 @@ class CmdLiveDiff(CmdLive):
 def shared_parent_parser():
     parent_parser = argparse.ArgumentParser(add_help=False)
     parent_parser.add_argument(
-        "target", help="Logs dir to produce summary from",
+        "target", help="Logs dir to produce summary from"
     ).complete = completion.DIR
     parent_parser.add_argument(
         "-o",

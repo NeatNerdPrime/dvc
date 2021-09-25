@@ -93,7 +93,7 @@ HTTP_COMMON = {
     "user": str,
     "password": str,
     "ask_password": Bool,
-    "ssl_verify": Bool,
+    "ssl_verify": Any(Bool, str),
     "method": str,
 }
 WEBDAV_COMMON = {
@@ -104,6 +104,7 @@ WEBDAV_COMMON = {
     "cert_path": str,
     "key_path": str,
     "timeout": Coerce(int),
+    "ssl_verify": Any(Bool, str),
 }
 
 SCHEMA = {
@@ -117,6 +118,7 @@ SCHEMA = {
         Optional("autostage", default=False): Bool,
         Optional("experiments"): Bool,  # obsoleted
         Optional("check_update", default=True): Bool,
+        "machine": Lower,
     },
     "cache": {
         "local": str,
@@ -145,7 +147,7 @@ SCHEMA = {
                     "session_token": str,
                     Optional("listobjects", default=False): Bool,  # obsoleted
                     Optional("use_ssl", default=True): Bool,
-                    Optional("ssl_verify", default=True): Bool,
+                    "ssl_verify": Any(Bool, str),
                     "sse": str,
                     "sse_kms_key_id": str,
                     "acl": str,
@@ -153,6 +155,9 @@ SCHEMA = {
                     "grant_read_acp": str,
                     "grant_write_acp": str,
                     "grant_full_control": str,
+                    "cache_regions": bool,
+                    "read_timeout": Coerce(int),
+                    "connect_timeout": Coerce(int),
                     **REMOTE_COMMON,
                 },
                 "gs": {
@@ -188,6 +193,11 @@ SCHEMA = {
                     "tenant_id": str,
                     "client_id": str,
                     "client_secret": str,
+                    "allow_anonymous_login": Bool,
+                    "exclude_environment_credential": Bool,
+                    "exclude_visual_studio_code_credential": Bool,
+                    "exclude_shared_token_cache_credential": Bool,
+                    "exclude_managed_identity_credential": Bool,
                     **REMOTE_COMMON,
                 },
                 "oss": {
@@ -215,13 +225,35 @@ SCHEMA = {
         )
     },
     "state": {
+        "dir": str,
         "row_limit": All(Coerce(int), Range(1)),  # obsoleted
         "row_cleanup_quota": All(Coerce(int), Range(0, 100)),  # obsoleted
     },
+    "index": {
+        "dir": str,
+    },
+    "machine": {
+        str: {
+            "cloud": All(Lower, Choices("aws", "azure")),
+            "region": All(
+                Lower, Choices("us-west", "us-east", "eu-west", "eu-north")
+            ),
+            "image": str,
+            "name": str,
+            "spot": Bool,
+            "spot_price": Coerce(float),
+            "instance_hdd_size": Coerce(int),
+            "instance_type": Lower,
+            "instance_gpu": Lower,
+            "ssh_private": str,
+            "startup_script": str,
+        },
+    },
     # section for experimental features
     "feature": {
+        Optional("machine", default=False): Bool,
         # enabled by default. It's of no use, kept for backward compatibility.
-        Optional("parametrization", default=True): Bool
+        Optional("parametrization", default=True): Bool,
     },
     "plots": {"html_template": str},
 }

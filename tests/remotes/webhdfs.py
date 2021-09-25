@@ -6,13 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from dvc.path_info import URLInfo
+from dvc.path_info import CloudURLInfo
 
 from .base import Base
 from .hdfs import _hdfs_root, md5md5crc32c
 
 
-class WebHDFS(Base, URLInfo):  # pylint: disable=abstract-method
+class WebHDFS(Base, CloudURLInfo):  # pylint: disable=abstract-method
     @contextmanager
     def _webhdfs(self):
         from hdfs import InsecureClient
@@ -143,11 +143,7 @@ class FakeClient:
                 root = posixpath.join(
                     hdfs_path, os.path.relpath(local_root, local_path)
                 )
-            yield (
-                root,
-                dnames,
-                fnames,
-            )
+            yield (root, dnames, fnames)
 
     def delete(self, hdfs_path):
         return self._path(hdfs_path).unlink()

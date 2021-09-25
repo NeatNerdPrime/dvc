@@ -45,6 +45,7 @@ class TempDirExecutor(BaseLocalExecutor):
     # suggestions) that are not applicable outside of workspace runs
     WARN_UNTRACKED = True
     QUIET = True
+    DEFAULT_LOCATION: Optional[str] = "temp"
 
     def __init__(
         self,
@@ -58,9 +59,7 @@ class TempDirExecutor(BaseLocalExecutor):
         super().__init__(*args, **kwargs)
         if cache_dir:
             self._config(cache_dir)
-        logger.debug(
-            "Init temp dir executor in dir '%s'", self._tmp_dir,
-        )
+        logger.debug("Init temp dir executor in dir '%s'", self._tmp_dir)
 
     def _config(self, cache_dir):
         local_config = os.path.join(self.dvc_dir, "config.local")

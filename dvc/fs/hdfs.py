@@ -1,3 +1,4 @@
+import errno
 import io
 import logging
 import os
@@ -6,10 +7,11 @@ import shutil
 import subprocess
 from collections import deque
 from contextlib import closing, contextmanager
-from urllib.parse import urlparse
+
+from tqdm.utils import CallbackIOWrapper
 
 from dvc.hash_info import HashInfo
-from dvc.progress import Tqdm
+from dvc.progress import DEFAULT_CALLBACK
 from dvc.scheme import Schemes
 from dvc.utils import fix_env, tmp_fname
 
@@ -65,26 +67,23 @@ class HDFSFileSystem(BaseFileSystem):
     PARAM_CHECKSUM = "checksum"
     TRAVERSE_PREFIX_LEN = 2
 
-    def __init__(self, repo, config):
-        super().__init__(repo, config)
+    BLOCK_SIZE = 2 ** 26  # 128MB
 
-        self.path_info = None
-        url = config.get("url")
-        if not url:
-            return
+    def __init__(self, **config):
+        super().__init__(**config)
 
-        parsed = urlparse(url)
-        user = parsed.username or config.get("user")
-
-        self.path_info = self.PATH_CLS.from_parts(
-            scheme=self.scheme,
-            host=parsed.hostname,
-            user=user,
-            port=parsed.port,
-            path=parsed.path,
-        )
+        self.host = config["host"]
+        self.user = config.get("user")
+        self.port = config.get("port")
 
         self.kerb_ticket = config.get("kerb_ticket")
+
+    @staticmethod
+    def _get_kwargs_from_urls(urlpath):
+        from fsspec.implementations.hdfs import PyArrowHDFS
+
+        # pylint:disable=protected-access
+        return PyArrowHDFS._get_kwargs_from_urls(urlpath)
 
     def hdfs(self, path_info):
         import pyarrow.fs
@@ -123,7 +122,7 @@ class HDFSFileSystem(BaseFileSystem):
                 raise FileNotFoundError(*e.args)
             raise
 
-    def exists(self, path_info, use_dvcignore=True):
+    def exists(self, path_info) -> bool:
         assert not isinstance(path_info, list)
         assert path_info.scheme == "hdfs"
         with self.hdfs(path_info) as hdfs:
@@ -159,15 +158,15 @@ class HDFSFileSystem(BaseFileSystem):
         if not topdown:
             yield root, dirs, nondirs
 
-    def walk(self, path_info, **kwargs):
-        if not self.isdir(path_info):
+    def walk(self, top, topdown=True, onerror=None, **kwargs):
+        if not self.isdir(top):
             return
 
-        with self.hdfs(path_info) as hdfs:
+        with self.hdfs(top) as hdfs:
             for root, dnames, fnames in self._walk(
-                hdfs, path_info.path, **kwargs
+                hdfs, top.path, topdown=topdown
             ):
-                yield path_info.replace(path=root), dnames, fnames
+                yield top.replace(path=root), dnames, fnames
 
     def walk_files(self, path_info, **kwargs):
         for root, _, fnames in self.walk(path_info):
@@ -188,7 +187,7 @@ class HDFSFileSystem(BaseFileSystem):
                 else:
                     hdfs.delete_file(path_info.path)
 
-    def makedirs(self, path_info):
+    def makedirs(self, path_info, **kwargs):
         with self.hdfs(path_info) as hdfs:
             # NOTE: fs.create_dir creates parents by default
             hdfs.create_dir(path_info.path)
@@ -226,8 +225,19 @@ class HDFSFileSystem(BaseFileSystem):
 
     def info(self, path_info):
         with self.hdfs(path_info) as hdfs:
-            finfo = hdfs.get_file_info(path_info.path)
-            return {"size": finfo.size}
+            from pyarrow.fs import FileType
+
+            file_info = hdfs.get_file_info(path_info.path)
+            if file_info.type is FileType.Directory:
+                kind = "directory"
+            elif file_info.type is FileType.File:
+                kind = "file"
+            else:
+                raise FileNotFoundError(
+                    errno.ENOENT, os.strerror(errno.ENOENT), path_info
+                )
+
+            return {"size": file_info.size, "type": kind}
 
     def checksum(self, path_info):
         return HashInfo(
@@ -236,42 +246,37 @@ class HDFSFileSystem(BaseFileSystem):
             size=self.getsize(path_info),
         )
 
-    def _upload_fobj(self, fobj, to_info):
+    def upload_fobj(self, fobj, to_info, **kwargs):
         with self.hdfs(to_info) as hdfs:
             with hdfs.open_output_stream(to_info.path) as fdest:
-                shutil.copyfileobj(fobj, fdest)
+                shutil.copyfileobj(fobj, fdest, self.BLOCK_SIZE)
 
-    def _upload(
-        self, from_file, to_info, name=None, no_progress_bar=False, **_kwargs
+    def put_file(
+        self, from_file, to_info, callback=DEFAULT_CALLBACK, **kwargs
     ):
         with self.hdfs(to_info) as hdfs:
+            hdfs.create_dir(to_info.parent.path)
+
             tmp_file = tmp_fname(to_info.path)
-            total = os.path.getsize(from_file)
+            total: int = os.path.getsize(from_file)
+            callback.set_size(total)
+
             with open(from_file, "rb") as fobj:
-                with Tqdm.wrapattr(
-                    fobj,
-                    "read",
-                    desc=name,
-                    total=total,
-                    disable=no_progress_bar,
-                ) as wrapped:
-                    with hdfs.open_output_stream(tmp_file) as sobj:
-                        sobj.write(wrapped.read())
+                wrapped = CallbackIOWrapper(callback.relative_update, fobj)
+                with hdfs.open_output_stream(tmp_file) as sobj:
+                    shutil.copyfileobj(wrapped, sobj, self.BLOCK_SIZE)
             hdfs.move(tmp_file, to_info.path)
 
-    def _download(
-        self, from_info, to_file, name=None, no_progress_bar=False, **_kwargs
+    def get_file(
+        self, from_info, to_file, callback=DEFAULT_CALLBACK, **kwargs
     ):
         with self.hdfs(from_info) as hdfs:
             file_info = hdfs.get_file_info(from_info.path)
             total = file_info.size
-            with open(to_file, "wb+") as fobj:
-                with Tqdm.wrapattr(
-                    fobj,
-                    "write",
-                    desc=name,
-                    total=total,
-                    disable=no_progress_bar,
-                ) as wrapped:
-                    with hdfs.open_input_stream(from_info.path) as sobj:
-                        wrapped.write(sobj.read())
+            if total:
+                callback.set_size(total)
+
+            with hdfs.open_input_stream(from_info.path) as sobj:
+                with open(to_file, "wb+") as fobj:
+                    wrapped = CallbackIOWrapper(callback.relative_update, sobj)
+                    shutil.copyfileobj(wrapped, fobj, self.BLOCK_SIZE)

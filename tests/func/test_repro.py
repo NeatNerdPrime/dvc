@@ -3,9 +3,9 @@ import os
 import re
 import shutil
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
-from mock import patch
 
 from dvc.dvcfile import DVC_FILE, Dvcfile
 from dvc.exceptions import (
@@ -15,7 +15,7 @@ from dvc.exceptions import (
 )
 from dvc.fs.local import LocalFileSystem
 from dvc.main import main
-from dvc.output.base import BaseOutput
+from dvc.output import Output
 from dvc.stage import Stage
 from dvc.stage.exceptions import StageFileDoesNotExistError
 from dvc.system import System
@@ -169,10 +169,12 @@ class TestReproWorkingDirectoryAsOutput(TestDvc):
 
         # NOTE: os.walk() walks in a sorted order and we need dir2 subdirs to
         # be processed before dir1 to load error.dvc first.
-        self.dvc.stages = [
-            nested_stage,
-            Dvcfile(self.dvc, error_stage_path).stage,
-        ]
+        self.dvc.index = self.dvc.index.update(
+            [
+                nested_stage,
+                Dvcfile(self.dvc, error_stage_path).stage,
+            ]
+        )
 
         with patch.object(self.dvc, "_reset"):  # to prevent `stages` resetting
             with self.assertRaises(StagePathAsOutputError):
@@ -652,7 +654,7 @@ class TestReproDataSource(TestReproChangedData):
 
         self.assertTrue(filecmp.cmp(self.FOO, self.BAR, shallow=False))
         self.assertEqual(
-            stages[0].outs[0].hash_info.value, file_md5(self.BAR, self.dvc.fs),
+            stages[0].outs[0].hash_info.value, file_md5(self.BAR, self.dvc.fs)
         )
 
 
@@ -883,9 +885,9 @@ class TestReproAlreadyCached(TestRepro):
         )
 
         patch_checkout = patch.object(
-            BaseOutput,
+            Output,
             "checkout",
-            side_effect=BaseOutput.checkout,
+            side_effect=Output.checkout,
             autospec=True,
         )
 
@@ -914,6 +916,7 @@ class TestShouldDisplayMetricsOnReproWithMetricsOption(TestDvc):
         self.assertEqual(0, ret)
 
         self._caplog.clear()
+        self._capsys.readouterr()  # clearing the buffer
 
         from dvc.dvcfile import DVC_FILE_SUFFIX
 
@@ -923,7 +926,8 @@ class TestShouldDisplayMetricsOnReproWithMetricsOption(TestDvc):
         self.assertEqual(0, ret)
 
         expected_metrics_display = f"Path\n{metrics_file}  {metrics_value}\n"
-        self.assertIn(expected_metrics_display, self._caplog.text)
+        actual, _ = self._capsys.readouterr()
+        self.assertIn(expected_metrics_display, actual)
 
 
 @pytest.fixture
@@ -1240,7 +1244,7 @@ def test_repro_when_cmd_changes(tmp_dir, dvc, run_copy, mocker):
 
     data = SingleStageFile(dvc, stage.path)._load()[0]
     data["cmd"] = "  ".join(stage.cmd.split())  # change cmd spacing by two
-    dump_yaml(stage.path, data)
+    (tmp_dir / stage.path).dump(data)
 
     assert dvc.status([stage.addressing]) == {
         stage.addressing: ["changed checksum"]

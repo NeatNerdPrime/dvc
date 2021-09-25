@@ -1,5 +1,4 @@
 """Exceptions raised by the dvc."""
-from typing import List
 
 
 class DvcException(Exception):
@@ -35,7 +34,7 @@ class OutputDuplicationError(DvcException):
             )
         else:
             msg = "output '{}' is already specified in stages:\n{}".format(
-                output, "\n".join(f"\t- {s.addressing}" for s in stages),
+                output, "\n".join(f"\t- {s.addressing}" for s in stages)
             )
         super().__init__(msg)
         self.stages = stages
@@ -173,36 +172,6 @@ class BadMetricError(DvcException):
         )
 
 
-class MetricsError(DvcException):
-    pass
-
-
-class NoMetricsParsedError(MetricsError):
-    def __init__(self, command):
-        super().__init__(
-            f"Could not parse {command} files. Use `-v` option to see more "
-            "details."
-        )
-
-
-class NoMetricsFoundError(MetricsError):
-    def __init__(self, command, run_options):
-        super().__init__(
-            f"No {command} files in this repository. "
-            f"Use `{run_options}` options for "
-            f"`dvc run` to mark stage outputs as {command}."
-        )
-
-
-class MetricDoesNotExistError(MetricsError):
-    def __init__(self, targets: List[str]):
-        if len(targets) == 1:
-            msg = "'{}' does not exist."
-        else:
-            msg = "'{}' do not exist."
-        super().__init__(msg.format(", ".join(targets)))
-
-
 class RecursiveAddingWhileUsingFilename(DvcException):
     def __init__(self):
         super().__init__(
@@ -259,18 +228,21 @@ class GitHookAlreadyExistsError(DvcException):
         )
 
 
-class DownloadError(DvcException):
+class FileTransferError(DvcException):
+    _METHOD = "transfer"
+
     def __init__(self, amount):
         self.amount = amount
 
-        super().__init__(f"{amount} files failed to download")
+        super().__init__(f"{amount} files failed to {self._METHOD}")
 
 
-class UploadError(DvcException):
-    def __init__(self, amount):
-        self.amount = amount
+class DownloadError(FileTransferError):
+    _METHOD = "download"
 
-        super().__init__(f"{amount} files failed to upload")
+
+class UploadError(FileTransferError):
+    _METHOD = "upload"
 
 
 class CheckoutError(DvcException):
@@ -283,7 +255,7 @@ class CheckoutError(DvcException):
         m = (
             "Checkout failed for following targets:\n{}\nIs your "
             "cache up to date?\n{}".format(
-                "\n".join(targets), error_link("missing-files"),
+                "\n".join(targets), error_link("missing-files")
             )
         )
         super().__init__(m)
@@ -380,7 +352,20 @@ class CacheLinkError(DvcException):
 
     def __init__(self, path_infos):
         msg = "No possible cache link types for '{}'. {}".format(
-            ", ".join([str(path) for path in path_infos]), self.SUPPORT_LINK,
+            ", ".join([str(path) for path in path_infos]), self.SUPPORT_LINK
         )
         super().__init__(msg)
         self.path_infos = path_infos
+
+
+class CircularImportError(DvcException):
+    def __init__(self, dep, a, b):
+        super().__init__(
+            f"'{dep}' contains invalid circular import. "
+            f"DVC repo '{a}' already imports from '{b}'."
+        )
+
+
+class PrettyDvcException(DvcException):
+    def __pretty_exc__(self, **kwargs):
+        """Print prettier exception message."""

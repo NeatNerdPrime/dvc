@@ -1,24 +1,27 @@
-from collections import defaultdict
+from typing import TYPE_CHECKING
 
 from dvc.scheme import Schemes
 
+if TYPE_CHECKING:
+    from .index import ObjectDBIndexBase
 
-def get_odb(fs):
+
+def get_odb(fs, path_info, **config):
     from .base import ObjectDB
     from .gdrive import GDriveObjectDB
     from .local import LocalObjectDB
-    from .ssh import SSHObjectDB
+    from .oss import OSSObjectDB
 
     if fs.scheme == Schemes.LOCAL:
-        return LocalObjectDB(fs)
-
-    if fs.scheme == Schemes.SSH:
-        return SSHObjectDB(fs)
+        return LocalObjectDB(fs, path_info, **config)
 
     if fs.scheme == Schemes.GDRIVE:
-        return GDriveObjectDB(fs)
+        return GDriveObjectDB(fs, path_info, **config)
 
-    return ObjectDB(fs)
+    if fs.scheme == Schemes.OSS:
+        return OSSObjectDB(fs, path_info, **config)
+
+    return ObjectDB(fs, path_info, **config)
 
 
 def _get_odb(repo, settings):
@@ -27,8 +30,22 @@ def _get_odb(repo, settings):
     if not settings:
         return None
 
-    fs = get_cloud_fs(repo, **settings)
-    return get_odb(fs)
+    cls, config, path_info = get_cloud_fs(repo, **settings)
+    config["tmp_dir"] = repo.tmp_dir
+    return get_odb(cls(**config), path_info, state=repo.state, **config)
+
+
+def get_index(odb) -> "ObjectDBIndexBase":
+    import hashlib
+
+    from .index import ObjectDBIndex, ObjectDBIndexNoop
+
+    cls = ObjectDBIndex if odb.tmp_dir else ObjectDBIndexNoop
+    return cls(
+        odb.tmp_dir,
+        hashlib.sha256(odb.path_info.url.encode("utf-8")).hexdigest(),
+        odb.fs.CHECKSUM_DIR_SUFFIX,
+    )
 
 
 class ODBManager:
@@ -80,99 +97,3 @@ class ODBManager:
     def by_scheme(self):
         self._init_odb(self.CLOUD_SCHEMES)
         yield from self._odb.items()
-
-
-class NamedCacheItem:
-    def __init__(self):
-        self.names = set()
-        self.children = defaultdict(NamedCacheItem)
-
-    def __eq__(self, other):
-        return self.names == other.names and self.children == other.children
-
-    def child_keys(self):
-        for key, child in self.children.items():
-            yield key
-            yield from child.child_keys()
-
-    def child_names(self):
-        for key, child in self.children.items():
-            yield key, child.names
-            yield from child.child_names()
-
-    def add(self, checksum, item):
-        self.children[checksum].update(item)
-
-    def update(self, item, suffix=""):
-        if suffix:
-            self.names.update(n + suffix for n in item.names)
-        else:
-            self.names.update(item.names)
-        for checksum, child_item in item.children.items():
-            self.children[checksum].update(child_item)
-
-
-class NamedCache:
-    # pylint: disable=protected-access
-    def __init__(self):
-        self._items = defaultdict(lambda: defaultdict(NamedCacheItem))
-        self.external = defaultdict(set)
-
-    @classmethod
-    def make(cls, scheme, checksum, name):
-        cache = cls()
-        cache.add(scheme, checksum, name)
-        return cache
-
-    def __getitem__(self, key):
-        return self._items[key]
-
-    def add(self, scheme, checksum, name):
-        """Add a mapped name for the specified checksum."""
-        self._items[scheme][checksum].names.add(name)
-
-    def add_child_cache(self, checksum, cache, suffix=""):
-        """Add/update child cache for the specified checksum."""
-        for scheme, src in cache._items.items():
-            dst = self._items[scheme][checksum].children
-            for child_checksum, item in src.items():
-                dst[child_checksum].update(item, suffix=suffix)
-
-        for repo_pair, files in cache.external.items():
-            self.external[repo_pair].update(files)
-
-    def add_external(self, url, rev, path):
-        self.external[url, rev].add(path)
-
-    def update(self, cache, suffix=""):
-        for scheme, src in cache._items.items():
-            dst = self._items[scheme]
-            for checksum, item in src.items():
-                dst[checksum].update(item, suffix=suffix)
-
-        for repo_pair, files in cache.external.items():
-            self.external[repo_pair].update(files)
-
-    def scheme_keys(self, scheme):
-        """Iterate over a flat list of all keys for the specified scheme,
-        including children.
-        """
-        for key, item in self._items[scheme].items():
-            yield key
-            yield from item.child_keys()
-
-    def scheme_names(self, scheme):
-        """Iterate over a flat list of checksum, names items for the specified
-        scheme, including children.
-        """
-        for key, item in self._items[scheme].items():
-            yield key, item.names
-            yield from item.child_names()
-
-    def dir_keys(self, scheme):
-        return (
-            key for key, item in self._items[scheme].items() if item.children
-        )
-
-    def child_keys(self, scheme, checksum):
-        return self._items[scheme][checksum].child_keys()

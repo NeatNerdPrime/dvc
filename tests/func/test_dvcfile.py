@@ -7,6 +7,7 @@ from dvc.dvcfile import (
     PIPELINE_FILE,
     PIPELINE_LOCK,
     Dvcfile,
+    LockfileCorruptedError,
     ParametrizedDumpError,
     SingleStageFile,
 )
@@ -15,7 +16,6 @@ from dvc.stage.exceptions import (
     StageFileFormatError,
 )
 from dvc.stage.loader import StageNotFound
-from dvc.utils.serialize import dump_yaml
 
 
 def test_run_load_one_for_multistage(tmp_dir, dvc):
@@ -164,7 +164,7 @@ def test_stage_collection(tmp_dir, dvc):
         always_changed=True,
         single_stage=True,
     )
-    assert set(dvc.stages) == {stage1, stage3, stage2}
+    assert set(dvc.index.stages) == {stage1, stage3, stage2}
 
 
 def test_remove_stage(tmp_dir, dvc, run_copy):
@@ -245,14 +245,14 @@ def test_remove_stage_on_lockfile_format_error(tmp_dir, dvc, run_copy):
     lock_data = lock_file.load()
     lock_data["gibberish"] = True
     data["gibberish"] = True
-    dump_yaml(lock_file.relpath, lock_data)
-    with pytest.raises(StageFileFormatError):
+    (tmp_dir / lock_file.relpath).dump(lock_data)
+    with pytest.raises(LockfileCorruptedError):
         dvc_file.remove_stage(stage)
 
     lock_file.remove()
     dvc_file.dump(stage, update_pipeline=False)
 
-    dump_yaml(dvc_file.relpath, data)
+    (tmp_dir / dvc_file.relpath).dump(data)
     with pytest.raises(StageFileFormatError):
         dvc_file.remove_stage(stage)
 
@@ -335,7 +335,7 @@ def test_dvcfile_dump_preserves_desc(tmp_dir, dvc, run_copy):
 
     data = dvcfile._load()[0]
     data["stages"]["run_copy"]["outs"][0] = {"bar": {"desc": out_desc}}
-    dump_yaml(dvcfile.path, data)
+    (tmp_dir / dvcfile.path).dump(data)
 
     assert stage.desc == stage_desc
     stage.outs[0].desc = out_desc
@@ -376,9 +376,7 @@ def test_dvcfile_dump_preserves_comments(tmp_dir, dvc):
     ],
 )
 def test_dvcfile_try_dumping_parametrized_stage(tmp_dir, dvc, data, name):
-    dump_yaml(
-        "dvc.yaml", {"stages": data, "vars": [{"foo": "foobar"}]},
-    )
+    (tmp_dir / "dvc.yaml").dump({"stages": data, "vars": [{"foo": "foobar"}]})
 
     stage = dvc.stage.load_one(name=name)
     dvcfile = stage.dvcfile

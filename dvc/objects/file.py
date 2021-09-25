@@ -1,23 +1,36 @@
 import errno
 import logging
 import os
+from typing import TYPE_CHECKING, Optional
 
 from .errors import ObjectFormatError
+
+if TYPE_CHECKING:
+    from dvc.fs.base import BaseFileSystem
+    from dvc.hash_info import HashInfo
+    from dvc.types import AnyPath
+
+    from .db.base import ObjectDB
 
 logger = logging.getLogger(__name__)
 
 
 class HashFile:
-    def __init__(self, path_info, fs, hash_info):
+    def __init__(
+        self,
+        path_info: Optional["AnyPath"],
+        fs: Optional["BaseFileSystem"],
+        hash_info: "HashInfo",
+        name: Optional[str] = None,
+    ):
         self.path_info = path_info
         self.fs = fs
         self.hash_info = hash_info
+        self.name = name
 
     @property
     def size(self):
-        if not (self.path_info and self.fs):
-            return None
-        return self.fs.getsize(self.path_info)
+        return self.hash_info.size
 
     def __len__(self):
         return 1
@@ -37,10 +50,18 @@ class HashFile:
             and self.hash_info == other.hash_info
         )
 
-    def check(self, odb, check_hash=True):
-        from .stage import get_file_hash
+    def __hash__(self):
+        return hash(
+            (
+                self.hash_info,
+                self.path_info,
+                self.fs.scheme if self.fs else None,
+            )
+        )
 
+    def check(self, odb: "ObjectDB", check_hash: bool = True):
         if not check_hash:
+            assert self.fs
             if not self.fs.exists(self.path_info):
                 raise FileNotFoundError(
                     errno.ENOENT, os.strerror(errno.ENOENT), self.path_info
@@ -48,8 +69,13 @@ class HashFile:
             else:
                 return None
 
+        self._check_hash(odb)
+
+    def _check_hash(self, odb):
+        from .stage import get_file_hash
+
         actual = get_file_hash(
-            self.path_info, self.fs, self.hash_info.name, odb.repo.state
+            self.path_info, self.fs, self.hash_info.name, odb.state
         )
 
         logger.trace(

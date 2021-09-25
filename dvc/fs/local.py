@@ -1,8 +1,5 @@
 import logging
 import os
-import stat
-
-from funcy import cached_property
 
 from dvc.path_info import PathInfo
 from dvc.scheme import Schemes
@@ -10,82 +7,52 @@ from dvc.system import System
 from dvc.utils import is_exec, tmp_fname
 from dvc.utils.fs import copy_fobj_to_file, copyfile, makedirs, move, remove
 
+from ..progress import DEFAULT_CALLBACK
 from .base import BaseFileSystem
 
 logger = logging.getLogger(__name__)
 
 
 class LocalFileSystem(BaseFileSystem):
+    sep = os.sep
+
     scheme = Schemes.LOCAL
     PATH_CLS = PathInfo
     PARAM_CHECKSUM = "md5"
     PARAM_PATH = "path"
     TRAVERSE_PREFIX_LEN = 2
 
-    def __init__(self, repo, config, use_dvcignore=False, dvcignore_root=None):
-        super().__init__(repo, config)
-        url = config.get("url")
-        self.path_info = self.PATH_CLS(url) if url else None
-        self.use_dvcignore = use_dvcignore
-        self.dvcignore_root = dvcignore_root
+    def __init__(self, **config):
+        from fsspec.implementations.local import LocalFileSystem as LocalFS
 
-    @property
-    def fs_root(self):
-        return self.config.get("url")
-
-    @cached_property
-    def dvcignore(self):
-        from dvc.ignore import DvcIgnoreFilter, DvcIgnoreFilterNoop
-
-        root = self.dvcignore_root or self.fs_root
-        cls = DvcIgnoreFilter if self.use_dvcignore else DvcIgnoreFilterNoop
-        return cls(self, root)
+        super().__init__(**config)
+        self.fs = LocalFS()
 
     @staticmethod
     def open(path_info, mode="r", encoding=None, **kwargs):
         return open(path_info, mode=mode, encoding=encoding)
 
-    def exists(self, path_info, use_dvcignore=True):
+    def exists(self, path_info) -> bool:
         assert isinstance(path_info, str) or path_info.scheme == "local"
-        if self.repo:
-            ret = os.path.lexists(path_info)
-        else:
-            ret = os.path.exists(path_info)
-        if not ret:
-            return False
-        if not use_dvcignore:
-            return True
+        # TODO: replace this with os.path.exists once the problem is fixed on
+        # the fsspec https://github.com/intake/filesystem_spec/issues/742
+        return os.path.lexists(path_info)
 
-        return not self.dvcignore.is_ignored_file(
-            path_info
-        ) and not self.dvcignore.is_ignored_dir(path_info)
+    def checksum(self, path_info) -> str:
+        return self.fs.checksum(path_info)
 
-    def isfile(self, path_info):
-        if not os.path.isfile(path_info):
-            return False
+    def isfile(self, path_info) -> bool:
+        return os.path.isfile(path_info)
 
-        return not self.dvcignore.is_ignored_file(path_info)
-
-    def isdir(
-        self, path_info, use_dvcignore=True
-    ):  # pylint: disable=arguments-differ
-        if not os.path.isdir(path_info):
-            return False
-        return not (use_dvcignore and self.dvcignore.is_ignored_dir(path_info))
+    def isdir(self, path_info) -> bool:
+        return os.path.isdir(path_info)
 
     def iscopy(self, path_info):
         return not (
             System.is_symlink(path_info) or System.is_hardlink(path_info)
         )
 
-    def walk(
-        self,
-        top,
-        topdown=True,
-        onerror=None,
-        use_dvcignore=True,
-        ignore_subrepos=True,
-    ):
+    def walk(self, top, topdown=True, onerror=None, **kwargs):
         """Directory fs generator.
 
         See `os.walk` for the docs. Differences:
@@ -94,14 +61,6 @@ class LocalFileSystem(BaseFileSystem):
         for root, dirs, files in os.walk(
             top, topdown=topdown, onerror=onerror
         ):
-            if use_dvcignore:
-                dirs[:], files[:] = self.dvcignore(
-                    os.path.abspath(root),
-                    dirs,
-                    files,
-                    ignore_subrepos=ignore_subrepos,
-                )
-
             yield os.path.normpath(root), dirs, files
 
     def walk_files(self, path_info, **kwargs):
@@ -125,21 +84,17 @@ class LocalFileSystem(BaseFileSystem):
                 raise NotImplementedError
         remove(path_info)
 
-    def makedirs(self, path_info):
-        makedirs(path_info, exist_ok=True)
+    def makedirs(self, path_info, **kwargs):
+        makedirs(path_info, exist_ok=kwargs.pop("exist_ok", True))
 
     def isexec(self, path_info):
-        mode = self.stat(path_info).st_mode
+        mode = self.info(path_info)["mode"]
         return is_exec(mode)
 
-    def stat(self, path):
-        if self.dvcignore.is_ignored(path):
-            raise FileNotFoundError
-
-        return os.stat(path)
-
     def move(self, from_info, to_info):
-        if from_info.scheme != "local" or to_info.scheme != "local":
+        if (
+            isinstance(from_info, PathInfo) and from_info.scheme != "local"
+        ) or (isinstance(to_info, PathInfo) and to_info.scheme != "local"):
             raise NotImplementedError
 
         self.makedirs(to_info.parent)
@@ -154,7 +109,7 @@ class LocalFileSystem(BaseFileSystem):
             self.remove(tmp_info)
             raise
 
-    def _upload_fobj(self, fobj, to_info):
+    def upload_fobj(self, fobj, to_info, **kwargs):
         self.makedirs(to_info.parent)
         tmp_info = to_info.parent / tmp_fname("")
         try:
@@ -201,32 +156,18 @@ class LocalFileSystem(BaseFileSystem):
     def reflink(self, from_info, to_info):
         System.reflink(from_info, to_info)
 
-    @staticmethod
-    def info(path_info):
-        st = os.stat(path_info)
-        return {
-            "size": st.st_size,
-            "type": "dir" if stat.S_ISDIR(st.st_mode) else "file",
-        }
+    def info(self, path_info):
+        return self.fs.info(path_info)
 
-    def _upload(
-        self, from_file, to_info, name=None, no_progress_bar=False, **_kwargs,
+    def put_file(
+        self, from_file, to_info, callback=DEFAULT_CALLBACK, **kwargs
     ):
         makedirs(to_info.parent, exist_ok=True)
-
         tmp_file = tmp_fname(to_info)
-        copyfile(
-            from_file, tmp_file, name=name, no_progress_bar=no_progress_bar
-        )
+        copyfile(from_file, tmp_file, callback=callback)
         os.replace(tmp_file, to_info)
 
-    @staticmethod
-    def _download(
-        from_info, to_file, name=None, no_progress_bar=False, **_kwargs
+    def get_file(
+        self, from_info, to_file, callback=DEFAULT_CALLBACK, **kwargs
     ):
-        copyfile(
-            from_info, to_file, no_progress_bar=no_progress_bar, name=name
-        )
-
-    def _reset(self):
-        return self.__dict__.pop("dvcignore", None)
+        copyfile(from_info, to_file, callback=callback)

@@ -1,6 +1,13 @@
 """Manages dvc remotes that user can use with push/pull/status commands."""
 
 import logging
+from typing import TYPE_CHECKING, Iterable, Optional
+
+from dvc.objects.db import get_index
+
+if TYPE_CHECKING:
+    from dvc.hash_info import HashInfo
+    from dvc.objects.db.base import ObjectDB
 
 logger = logging.getLogger(__name__)
 
@@ -19,14 +26,18 @@ class DataCloud:
     def __init__(self, repo):
         self.repo = repo
 
-    def get_remote(self, name=None, command="<command>"):
+    def get_remote_odb(
+        self,
+        name: Optional[str] = None,
+        command: str = "<command>",
+    ) -> "ObjectDB":
         from dvc.config import NoRemoteError
 
         if not name:
             name = self.repo.config["core"].get("remote")
 
         if name:
-            return self._init_remote(name)
+            return self._init_odb(name)
 
         if bool(self.repo.config["remote"]):
             error_msg = (
@@ -43,85 +54,107 @@ class DataCloud:
 
         raise NoRemoteError(error_msg)
 
-    def _init_remote(self, name):
-        from dvc.remote import get_remote
+    def _init_odb(self, name):
+        from dvc.fs import get_cloud_fs
+        from dvc.objects.db import get_odb
 
-        return get_remote(self.repo, name=name)
+        cls, config, path_info = get_cloud_fs(self.repo, name=name)
+        config["tmp_dir"] = self.repo.index_db_dir
+        return get_odb(cls(**config), path_info, **config)
 
     def push(
-        self, cache, jobs=None, remote=None, show_checksums=False,
+        self,
+        objs: Iterable["HashInfo"],
+        jobs: Optional[int] = None,
+        remote: Optional[str] = None,
+        odb: Optional["ObjectDB"] = None,
     ):
         """Push data items in a cloud-agnostic way.
 
         Args:
-            cache (NamedCache): named checksums to push to the cloud.
-            jobs (int): number of jobs that can be running simultaneously.
-            remote (dvc.remote.base.BaseRemote): optional remote to push to.
+            objs: objects to push to the cloud.
+            jobs: number of jobs that can be running simultaneously.
+            remote: optional name of remote to push to.
                 By default remote from core.remote config option is used.
-            show_checksums (bool): show checksums instead of file names in
-                information messages.
+            odb: optional ODB to push to. Overrides remote.
         """
-        remote = self.get_remote(remote, "push")
+        from dvc.objects.transfer import transfer
 
-        return remote.push(
+        if not odb:
+            odb = self.get_remote_odb(remote, "push")
+        return transfer(
             self.repo.odb.local,
-            cache,
+            odb,
+            objs,
             jobs=jobs,
-            show_checksums=show_checksums,
+            dest_index=get_index(odb),
+            cache_odb=self.repo.odb.local,
         )
 
     def pull(
-        self, cache, jobs=None, remote=None, show_checksums=False,
+        self,
+        objs: Iterable["HashInfo"],
+        jobs: Optional[int] = None,
+        remote: Optional[str] = None,
+        odb: Optional["ObjectDB"] = None,
     ):
         """Pull data items in a cloud-agnostic way.
 
         Args:
-            cache (NamedCache): named checksums to pull from the cloud.
-            jobs (int): number of jobs that can be running simultaneously.
-            remote (dvc.remote.base.BaseRemote): optional remote to pull from.
+            objs: objects to pull from the cloud.
+            jobs: number of jobs that can be running simultaneously.
+            remote: optional name of remote to pull from.
                 By default remote from core.remote config option is used.
-            show_checksums (bool): show checksums instead of file names in
-                information messages.
+            odb: optional ODB to pull from. Overrides remote.
         """
-        remote = self.get_remote(remote, "pull")
+        from dvc.objects.transfer import transfer
 
-        return remote.pull(
+        if not odb:
+            odb = self.get_remote_odb(remote, "pull")
+        return transfer(
+            odb,
             self.repo.odb.local,
-            cache,
+            objs,
             jobs=jobs,
-            show_checksums=show_checksums,
+            src_index=get_index(odb),
+            cache_odb=self.repo.odb.local,
+            verify=odb.verify,
         )
 
     def status(
         self,
-        cache,
-        jobs=None,
-        remote=None,
-        show_checksums=False,
-        log_missing=True,
+        objs: Iterable["HashInfo"],
+        jobs: Optional[int] = None,
+        remote: Optional[str] = None,
+        odb: Optional["ObjectDB"] = None,
+        log_missing: bool = True,
     ):
         """Check status of data items in a cloud-agnostic way.
 
         Args:
-            cache (NamedCache): named checksums to check status for.
-            jobs (int): number of jobs that can be running simultaneously.
-            remote (dvc.remote.base.BaseRemote): optional remote to compare
+            objs: objects to check status for.
+            jobs: number of jobs that can be running simultaneously.
+            remote: optional remote to compare
                 cache to. By default remote from core.remote config option
                 is used.
-            show_checksums (bool): show checksums instead of file names in
-                information messages.
-            log_missing (bool): log warning messages if file doesn't exist
+            odb: optional ODB to check status from. Overrides remote.
+            log_missing: log warning messages if file doesn't exist
                 neither in cache, neither in cloud.
         """
-        remote = self.get_remote(remote, "status")
-        return remote.status(
+        from dvc.objects.status import compare_status
+
+        if not odb:
+            odb = self.get_remote_odb(remote, "status")
+        return compare_status(
             self.repo.odb.local,
-            cache,
+            odb,
+            objs,
             jobs=jobs,
-            show_checksums=show_checksums,
             log_missing=log_missing,
+            dest_index=get_index(odb),
+            cache_odb=self.repo.odb.local,
         )
 
     def get_url_for(self, remote, checksum):
-        remote = self.get_remote(remote)
-        return str(remote.odb.hash_to_path_info(checksum))
+        remote_odb = self.get_remote_odb(remote)
+        return str(remote_odb.hash_to_path_info(checksum))

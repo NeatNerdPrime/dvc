@@ -1,10 +1,7 @@
-import collections
 import contextlib
 import logging
 import os
-from typing import TYPE_CHECKING, Any, Union
-
-from voluptuous import MultipleInvalid
+from typing import TYPE_CHECKING, Any, Callable, Tuple, Type, TypeVar, Union
 
 from dvc.exceptions import DvcException
 from dvc.parsing.versions import LOCKFILE_VERSION, SCHEMA_KWD
@@ -18,17 +15,14 @@ from dvc.stage.exceptions import (
 from dvc.types import AnyPath
 from dvc.utils import relpath
 from dvc.utils.collections import apply_diff
-from dvc.utils.serialize import (
-    dump_yaml,
-    modify_yaml,
-    parse_yaml,
-    parse_yaml_for_update,
-)
+from dvc.utils.serialize import dump_yaml, modify_yaml
+from dvc.utils.strictyaml import YAMLValidationError
 
 if TYPE_CHECKING:
     from dvc.repo import Repo
 
 logger = logging.getLogger(__name__)
+_T = TypeVar("_T")
 
 DVC_FILE = "Dvcfile"
 DVC_FILE_SUFFIX = ".dvc"
@@ -37,12 +31,17 @@ PIPELINE_LOCK = "dvc.lock"
 
 
 class FileIsGitIgnored(DvcException):
-    def __init__(self, path):
-        super().__init__(f"'{path}' is git-ignored.")
+    def __init__(self, path, pipeline_file=False):
+        super().__init__(
+            "{}'{}' is git-ignored.".format(
+                "bad DVC file name " if pipeline_file else "", path
+            )
+        )
 
 
 class LockfileCorruptedError(DvcException):
-    pass
+    def __init__(self, path):
+        super().__init__(f"Lockfile '{path}' is corrupted.")
 
 
 class ParametrizedDumpError(DvcException):
@@ -66,7 +65,19 @@ def is_lock_file(path):
     return os.path.basename(path) == PIPELINE_LOCK
 
 
-def check_dvc_filename(path):
+def is_git_ignored(repo, path):
+    from dvc.fs.local import LocalFileSystem
+    from dvc.scm.base import NoSCMError
+
+    try:
+        return isinstance(repo.fs, LocalFileSystem) and repo.scm.is_ignored(
+            path
+        )
+    except NoSCMError:
+        return False
+
+
+def check_dvcfile_path(repo, path):
     if not is_valid_filename(path):
         raise StageFileBadNameError(
             "bad DVC file name '{}'. DVC files should be named "
@@ -75,9 +86,13 @@ def check_dvc_filename(path):
             )
         )
 
+    if is_git_ignored(repo, path):
+        raise FileIsGitIgnored(relpath(path), True)
+
 
 class FileMixin:
-    SCHEMA = None
+    SCHEMA: Callable[[_T], _T]
+    ValidationError: Type[DvcException] = StageFileFormatError
 
     def __init__(self, repo, path, verify=True, **kwargs):
         self.repo = repo
@@ -105,50 +120,60 @@ class FileMixin:
         return relpath(self.path)
 
     def exists(self):
-        return self.repo.fs.exists(self.path)
+        is_ignored = self.repo.dvcignore.is_ignored_file(self.path)
+        return self.repo.fs.exists(self.path) and not is_ignored
 
     def _is_git_ignored(self):
-        from dvc.fs.local import LocalFileSystem
-
-        return isinstance(
-            self.repo.fs, LocalFileSystem
-        ) and self.repo.scm.is_ignored(self.path)
+        return is_git_ignored(self.repo, self.path)
 
     def _verify_filename(self):
         if self.verify:
-            check_dvc_filename(self.path)
+            check_dvcfile_path(self.repo, self.path)
 
     def _check_gitignored(self):
         if self._is_git_ignored():
             raise FileIsGitIgnored(self.path)
 
-    def _load(self):
+    def _load(self) -> Tuple[Any, str]:
         # it raises the proper exceptions by priority:
         # 1. when the file doesn't exists
         # 2. filename is not a DVC file
         # 3. path doesn't represent a regular file
         # 4. when the file is git ignored
         if not self.exists():
-            is_ignored = self.repo.fs.exists(self.path, use_dvcignore=False)
-            raise StageFileDoesNotExistError(self.path, dvc_ignored=is_ignored)
+            dvc_ignored = self.repo.dvcignore.is_ignored_file(self.path)
+            raise StageFileDoesNotExistError(
+                self.path, dvc_ignored=dvc_ignored
+            )
 
         self._verify_filename()
         if not self.repo.fs.isfile(self.path):
             raise StageFileIsNotDvcFileError(self.path)
 
         self._check_gitignored()
-        with self.repo.fs.open(self.path, encoding="utf-8") as fd:
-            stage_text = fd.read()
-        d = parse_yaml(stage_text, self.path)
-        return self.validate(d, self.relpath), stage_text
+        return self._load_yaml()
 
     @classmethod
-    def validate(cls, d, fname=None):
-        assert isinstance(cls.SCHEMA, collections.abc.Callable)
+    def validate(cls, d: _T, fname: str = None) -> _T:
+        from dvc.utils.strictyaml import validate
+
         try:
-            return cls.SCHEMA(d)  # pylint: disable=not-callable
-        except MultipleInvalid as exc:
-            raise StageFileFormatError(f"'{fname}' format error: {exc}")
+            return validate(d, cls.SCHEMA)  # type: ignore[arg-type]
+        except YAMLValidationError as exc:
+            raise cls.ValidationError(fname) from exc
+
+    def _load_yaml(self, **kwargs: Any) -> Tuple[Any, str]:
+        from dvc.utils import strictyaml
+
+        try:
+            return strictyaml.load(
+                self.path,
+                self.SCHEMA,  # type: ignore[arg-type]
+                self.repo.fs,
+                **kwargs,
+            )
+        except YAMLValidationError as exc:
+            raise self.ValidationError(self.relpath) from exc
 
     def remove(self, force=False):  # pylint: disable=unused-argument
         with contextlib.suppress(FileNotFoundError):
@@ -181,10 +206,8 @@ class SingleStageFile(FileMixin):
 
         assert not isinstance(stage, PipelineStage)
         if self.verify:
-            check_dvc_filename(self.path)
-        logger.debug(
-            "Saving information to '{file}'.".format(file=relpath(self.path))
-        )
+            check_dvcfile_path(self.repo, self.path)
+        logger.debug(f"Saving information to '{relpath(self.path)}'.")
         dump_yaml(self.path, serialize.to_single_stage_file(stage))
         self.repo.scm.track_file(self.relpath)
 
@@ -218,7 +241,7 @@ class PipelineFile(FileMixin):
 
         assert isinstance(stage, PipelineStage)
         if self.verify:
-            check_dvc_filename(self.path)
+            check_dvcfile_path(self.repo, self.path)
 
         if update_pipeline and not stage.is_data_source:
             self._dump_pipeline_file(stage)
@@ -282,10 +305,7 @@ class PipelineFile(FileMixin):
         if not self.exists():
             return
 
-        with open(self.path, "r", encoding="utf-8") as f:
-            d = parse_yaml_for_update(f.read(), self.path)
-
-        self.validate(d, self.path)
+        d, _ = self._load_yaml(round_trip=True)
         if stage.name not in d.get("stages", {}):
             return
 
@@ -327,14 +347,14 @@ def migrate_lock_v1_to_v2(d, version_info):
     d["stages"] = stages
 
 
+def lockfile_schema(data: _T) -> _T:
+    schema = get_lockfile_schema(data)
+    return schema(data)
+
+
 class Lockfile(FileMixin):
-    @classmethod
-    def validate(cls, d, fname=None):
-        schema = get_lockfile_schema(d)
-        try:
-            return schema(d)
-        except MultipleInvalid as exc:
-            raise StageFileFormatError(f"'{fname}' format error: {exc}")
+    SCHEMA = staticmethod(lockfile_schema)  # type: ignore[assignment]
+    ValidationError = LockfileCorruptedError
 
     def _verify_filename(self):
         pass  # lockfile path is hardcoded, so no need to verify here
@@ -347,10 +367,6 @@ class Lockfile(FileMixin):
             # even though it may not exist or have been .dvcignored
             self._check_gitignored()
             return {}, ""
-        except StageFileFormatError as exc:
-            raise LockfileCorruptedError(
-                f"Lockfile '{self.relpath}' is corrupted."
-            ) from exc
 
     def load(self):
         d, _ = self._load()
@@ -393,10 +409,7 @@ class Lockfile(FileMixin):
         if not self.exists():
             return
 
-        with open(self.path, encoding="utf-8") as f:
-            d = parse_yaml_for_update(f.read(), self.path)
-        self.validate(d, self.path)
-
+        d, _ = self._load_yaml(round_trip=True)
         version = LOCKFILE_VERSION.from_dict(d)
         data = d if version == LOCKFILE_VERSION.V1 else d.get("stages", {})
         if stage.name not in data:

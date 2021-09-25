@@ -7,9 +7,7 @@ from dvc.exceptions import InvalidArgumentError
 from tests.unit.fs.test_repo import make_subrepo
 
 
-@pytest.mark.parametrize(
-    "cached", [True, False],
-)
+@pytest.mark.parametrize("cached", [True, False])
 def test_update_import(tmp_dir, dvc, erepo_dir, cached):
     gen = erepo_dir.dvc_gen if cached else erepo_dir.scm_gen
 
@@ -146,7 +144,7 @@ def test_update_before_and_after_dvc_init(tmp_dir, dvc, git_dir):
         "file.dvc": [
             {
                 "changed deps": {
-                    "file ({})".format(os.fspath(git_dir)): "update available"
+                    f"file ({os.fspath(git_dir)})": "update available"
                 }
             }
         ]
@@ -163,7 +161,9 @@ def test_update_before_and_after_dvc_init(tmp_dir, dvc, git_dir):
     [
         pytest.lazy_fixture("local_cloud"),
         pytest.lazy_fixture("s3"),
-        pytest.lazy_fixture("gs"),
+        pytest.param(
+            pytest.lazy_fixture("gs"), marks=pytest.mark.needs_internet
+        ),
         pytest.lazy_fixture("hdfs"),
         pytest.lazy_fixture("webhdfs"),
         pytest.param(
@@ -239,10 +239,7 @@ def test_update_recursive(tmp_dir, dvc, erepo_dir):
 
     tmp_dir.gen({"dir": {"subdir": {}}})
     stage1 = dvc.imp(
-        os.fspath(erepo_dir),
-        "foo1",
-        os.path.join("dir", "foo1"),
-        rev="branch",
+        os.fspath(erepo_dir), "foo1", os.path.join("dir", "foo1"), rev="branch"
     )
     stage2 = dvc.imp(
         os.fspath(erepo_dir),
@@ -331,7 +328,9 @@ def test_update_import_to_remote(tmp_dir, dvc, erepo_dir, local_remote):
     [
         pytest.lazy_fixture("local_cloud"),
         pytest.lazy_fixture("s3"),
-        pytest.lazy_fixture("gs"),
+        pytest.param(
+            pytest.lazy_fixture("gs"), marks=pytest.mark.needs_internet
+        ),
         pytest.lazy_fixture("hdfs"),
     ],
     indirect=True,
@@ -350,9 +349,10 @@ def test_update_import_url_to_remote(tmp_dir, dvc, workspace, local_remote):
 @pytest.mark.parametrize(
     "workspace",
     [
-        pytest.lazy_fixture("local_cloud"),
         pytest.lazy_fixture("s3"),
-        pytest.lazy_fixture("gs"),
+        pytest.param(
+            pytest.lazy_fixture("gs"), marks=pytest.mark.needs_internet
+        ),
         pytest.lazy_fixture("hdfs"),
     ],
     indirect=True,
@@ -377,8 +377,15 @@ def test_update_import_url_to_remote_directory(
         }
     )
 
-    upload_file_mock = mocker.spy(type(dvc.odb.local.fs), "upload_fobj")
+    download_file_mock = mocker.spy(
+        type(dvc.cloud.get_remote_odb("cache").fs), "download_file"
+    )
     stage = dvc.update(stage.path, to_remote=True)
+
+    # 2 new hashes (foo2, baz2)
+    assert download_file_mock.mock.call_count == 2
+    # The new .dir hash will be transferred through MemFs, so
+    # we will not account the download_file() for it.
 
     dvc.pull("data")
     assert (tmp_dir / "data").read_text() == {
@@ -391,8 +398,6 @@ def test_update_import_url_to_remote_directory(
             "foo_with_different_name": "foo",
         },
     }
-    # 2 new hashes (foo2, baz2) + 1 .dir hash
-    assert upload_file_mock.mock.call_count == 3
 
 
 def test_update_import_url_to_remote_directory_changed_contents(

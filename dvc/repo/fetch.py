@@ -1,8 +1,7 @@
 import logging
-import os
 
-from dvc.config import NoRemoteError
-from dvc.exceptions import DownloadError, NoOutputOrStageError
+from dvc.exceptions import DownloadError, FileTransferError
+from dvc.scheme import Schemes
 
 from . import locked
 
@@ -16,7 +15,6 @@ def fetch(
     jobs=None,
     remote=None,
     all_branches=False,
-    show_checksums=False,
     with_deps=False,
     all_tags=False,
     recursive=False,
@@ -36,11 +34,10 @@ def fetch(
         config.NoRemoteError: thrown when downloading only local files and no
             remote is configured
     """
-
     if isinstance(targets, str):
         targets = [targets]
 
-    used = self.used_cache(
+    used = self.used_objs(
         targets,
         all_branches=all_branches,
         all_tags=all_tags,
@@ -59,17 +56,21 @@ def fetch(
     try:
         if run_cache:
             self.stage_cache.pull(remote)
-        downloaded += self.cloud.pull(
-            used, jobs, remote=remote, show_checksums=show_checksums,
-        )
-    except NoRemoteError:
-        if not used.external and used["local"]:
-            raise
     except DownloadError as exc:
         failed += exc.amount
 
-    for (repo_url, repo_rev), files in used.external.items():
-        d, f = _fetch_external(self, repo_url, repo_rev, files, jobs)
+    for odb, obj_ids in sorted(
+        used.items(),
+        key=lambda item: item[0] is not None
+        and item[0].fs.scheme == Schemes.MEMORY,
+    ):
+        d, f = _fetch(
+            self,
+            obj_ids,
+            jobs=jobs,
+            remote=remote,
+            odb=odb,
+        )
         downloaded += d
         failed += f
 
@@ -79,53 +80,11 @@ def fetch(
     return downloaded
 
 
-def _fetch_external(self, repo_url, repo_rev, files, jobs):
-    from dvc.external_repo import external_repo
-    from dvc.objects import save
-    from dvc.objects.stage import stage
-    from dvc.path_info import PathInfo
-    from dvc.scm.base import CloneError
-
+def _fetch(repo, obj_ids, **kwargs):
+    downloaded = 0
     failed = 0
-
-    results = []
-
-    def cb(result):
-        results.append(result)
-
-    odb = self.odb.local
     try:
-        with external_repo(
-            repo_url, repo_rev, cache_dir=odb.cache_dir
-        ) as repo:
-            root = PathInfo(repo.root_dir)
-            for path in files:
-                path_info = root / path
-                try:
-                    used = repo.used_cache(
-                        [os.fspath(path_info)],
-                        force=True,
-                        jobs=jobs,
-                        recursive=True,
-                    )
-                    cb(repo.cloud.pull(used, jobs))
-                except (NoOutputOrStageError, NoRemoteError):
-                    pass
-                obj = stage(
-                    odb,
-                    path_info,
-                    repo.repo_fs,
-                    "md5",
-                    jobs=jobs,
-                    follow_subrepos=False,
-                )
-                save(
-                    odb, obj, jobs=jobs, download_callback=cb,
-                )
-    except CloneError:
-        failed += 1
-        logger.exception(
-            "failed to fetch data for '{}'".format(", ".join(files))
-        )
-
-    return sum(results), failed
+        downloaded += repo.cloud.pull(obj_ids, **kwargs)
+    except FileTransferError as exc:
+        failed += exc.amount
+    return downloaded, failed

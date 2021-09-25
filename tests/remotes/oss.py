@@ -9,7 +9,7 @@ from dvc.utils import env2bool
 
 from .base import Base
 
-TEST_OSS_REPO_BUCKET = "dvc-test"
+TEST_OSS_REPO_BUCKET = "dvc-test-github"
 EMULATOR_OSS_ENDPOINT = "127.0.0.1:{port}"
 EMULATOR_OSS_ACCESS_KEY_ID = "AccessKeyID"
 EMULATOR_OSS_ACCESS_KEY_SECRET = "AccessKeySecret"
@@ -63,15 +63,23 @@ def oss_server(test_config, docker_compose, docker_services):
 
 
 @pytest.fixture
-def oss(oss_server):
-    url = OSS.get_url()
-    ret = OSS(url)
-    ret.config = {
-        "url": url,
-        "oss_key_id": EMULATOR_OSS_ACCESS_KEY_ID,
-        "oss_key_secret": EMULATOR_OSS_ACCESS_KEY_SECRET,
-        "oss_endpoint": oss_server,
-    }
+def oss(real_oss):
+    import oss2
+
+    ret = real_oss
+
+    auth = oss2.Auth(ret.config["oss_key_id"], ret.config["oss_key_secret"])
+    bucket = oss2.Bucket(
+        auth, ret.config["oss_endpoint"], TEST_OSS_REPO_BUCKET
+    )
+    try:
+        bucket.get_bucket_info()
+    except oss2.exceptions.NoSuchBucket:
+        bucket.create_bucket(
+            oss2.BUCKET_ACL_PUBLIC_READ,
+            oss2.models.BucketCreateConfig(oss2.BUCKET_STORAGE_CLASS_STANDARD),
+        )
+
     return ret
 
 

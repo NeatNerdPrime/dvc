@@ -4,6 +4,8 @@ import logging
 from dvc.command import completion
 from dvc.command.base import CmdBase, append_doc_link, fix_subparsers
 from dvc.exceptions import DvcException
+from dvc.render.utils import find_vega, render
+from dvc.ui import ui
 from dvc.utils import format_link
 
 logger = logging.getLogger(__name__)
@@ -34,35 +36,50 @@ class CmdPlots(CmdBase):
                 return 1
 
         try:
-            plots = self._func(targets=self.args.targets, props=self._props())
+            plots_data = self._func(
+                targets=self.args.targets, props=self._props()
+            )
+
+            if not plots_data:
+                ui.error_write(
+                    "No plots were loaded, "
+                    "visualization file will not be created."
+                )
 
             if self.args.show_vega:
                 target = self.args.targets[0]
-                logger.info(plots[target])
+                plot_json = find_vega(self.repo, plots_data, target)
+                if plot_json:
+                    ui.write(plot_json)
                 return 0
 
-            rel: str = self.args.out or "plots.html"
-            path = (Path.cwd() / rel).resolve()
-            self.repo.plots.write_html(
-                path, plots=plots, html_template_path=self.args.html_template
+            rel: str = self.args.out or "dvc_plots"
+            path: Path = (Path.cwd() / rel).resolve()
+            index_path = render(
+                self.repo,
+                plots_data,
+                path=path,
+                html_template_path=self.args.html_template,
             )
+
+            assert index_path.is_absolute()
+            url = index_path.as_uri()
+            ui.write(url)
+
+            if self.args.open:
+                import webbrowser
+
+                opened = webbrowser.open(index_path)
+                if not opened:
+                    ui.error_write(
+                        "Failed to open. Please try opening it manually."
+                    )
+                    return 1
+            return 0
 
         except DvcException:
             logger.exception("")
             return 1
-
-        assert path.is_absolute()  # as_uri throws ValueError if not absolute
-        url = path.as_uri()
-        logger.info(url)
-        if self.args.open:
-            import webbrowser
-
-            opened = webbrowser.open(rel)
-            if not opened:
-                logger.error("Failed to open. Please try opening it manually.")
-                return 1
-
-        return 0
 
 
 class CmdPlotsShow(CmdPlots):
@@ -87,7 +104,7 @@ class CmdPlotsDiff(CmdPlots):
 class CmdPlotsModify(CmdPlots):
     def run(self):
         self.repo.plots.modify(
-            self.args.target, props=self._props(), unset=self.args.unset,
+            self.args.target, props=self._props(), unset=self.args.unset
         )
         return 0
 
@@ -95,7 +112,7 @@ class CmdPlotsModify(CmdPlots):
 def add_parser(subparsers, parent_parser):
     PLOTS_HELP = (
         "Commands to visualize and compare plot metrics in structured files "
-        "(JSON, YAML, CSV, TSV)"
+        "(JSON, YAML, CSV, TSV)."
     )
 
     plots_parser = subparsers.add_parser(
@@ -160,7 +177,7 @@ def add_parser(subparsers, parent_parser):
         help=argparse.SUPPRESS,
     )
     plots_diff_parser.add_argument(
-        "revisions", nargs="*", default=None, help="Git commits to plot from",
+        "revisions", nargs="*", default=None, help="Git commits to plot from"
     )
     _add_props_arguments(plots_diff_parser)
     _add_output_arguments(plots_diff_parser)
@@ -175,7 +192,7 @@ def add_parser(subparsers, parent_parser):
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     plots_modify_parser.add_argument(
-        "target", help="Metric file to set properties to",
+        "target", help="Metric file to set properties to"
     ).complete = completion.FILE
     _add_props_arguments(plots_modify_parser)
     plots_modify_parser.add_argument(
